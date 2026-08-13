@@ -1,0 +1,54 @@
+name: Build App Creator APK
+on:
+  repository_dispatch:
+    types: [appcreator_build]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Generate Android WebView project
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          python3 - <<'PY'
+          import os,json,pathlib,re
+          p=json.loads(os.environ['PAYLOAD']); r=pathlib.Path('buildapp')
+          (r/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True)
+          (r/'app/src/main/res/values').mkdir(parents=True,exist_ok=True)
+          (r/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
+          (r/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
+          appid='com.appcreator.'+re.sub(r'[^a-z0-9]','',p['slug'].lower())[:12]
+          (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId '"+appid+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
+          name=p['name'].replace('&','&amp;').replace('"','&quot;')
+          (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
+          target=p['target_url'].replace('\\','\\\\').replace('"','\\"')
+          java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
+          (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
+          PY
+      - name: Build release APK
+        working-directory: buildapp
+        run: gradle assembleRelease
+      - name: Upload APK and update database
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BUILD_ID: ${{ github.event.client_payload.build_id }}
+          PROJECT_ID: ${{ github.event.client_payload.project_id }}
+        run: |
+          python3 - <<'PY'
+          import os,urllib.request,json,pathlib
+          u=os.environ['SUPABASE_URL']; k=os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          apk=next(pathlib.Path('buildapp/app/build/outputs/apk/release').glob('*.apk')); path=f"{os.environ['PROJECT_ID']}/{apk.name}"
+          q=urllib.request.Request(f'{u}/storage/v1/object/appcreator-apks/{path}',data=apk.read_bytes(),method='POST',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/vnd.android.package-archive','x-upsert':'true'}); urllib.request.urlopen(q).read()
+          q=urllib.request.Request(f'{u}/storage/v1/object/sign/appcreator-apks/{path}',data=json.dumps({'expiresIn':315360000}).encode(),method='POST',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/json'}); signed=json.load(urllib.request.urlopen(q)); apkurl=u+signed['signedURL'] if signed['signedURL'].startswith('/') else signed['signedURL']
+          def patch(t,w,d):
+            q=urllib.request.Request(f'{u}/rest/v1/{t}?{w}',data=json.dumps(d).encode(),method='PATCH',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/json','Prefer':'return=minimal'}); urllib.request.urlopen(q).read()
+          patch('app_creator_builds',f"id=eq.{os.environ['BUILD_ID']}",{'status':'ready','apk_path':path})
+          patch('app_creator_projects',f"id=eq.{os.environ['PROJECT_ID']}",{'status':'ready','apk_path':path,'apk_url':apkurl})
+          PY
