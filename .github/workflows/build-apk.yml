@@ -21,4 +21,91 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
-      - name: Find newest queued
+      - name: Find newest queued build
+        id: job
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request
+          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.desc&limit=1'
+          req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
+          with urllib.request.urlopen(req) as r: rows=json.load(r)
+          if not rows: raise SystemExit(0)
+          row=rows[0]; p=row['app_creator_projects']
+          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'})
+          with urllib.request.urlopen(patch): pass
+          for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}.items():
+            with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write(f'{k}={v}\n')
+          PY
+      - name: Generate Android WebView project
+        if: steps.job.outputs.build_id != ''
+        env:
+          SLUG: ${{ steps.job.outputs.slug }}
+          APP_NAME: ${{ steps.job.outputs.name }}
+          TARGET_URL: ${{ steps.job.outputs.target_url }}
+        run: |
+          python3 - <<'PY'
+          import os,pathlib,re,html
+          r=pathlib.Path('buildapp'); (r/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True); (r/'app/src/main/res/values').mkdir(parents=True,exist_ok=True)
+          (r/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
+          (r/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
+          slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:12] or 'app'
+          (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId 'com.appcreator."+slug+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
+          name=html.escape(os.environ['APP_NAME'],quote=True)
+          (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
+          target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
+          java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
+          (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
+          PY
+      - name: Build signed debug APK
+        if: steps.job.outputs.build_id != ''
+        working-directory: buildapp
+        run: gradle --no-daemon --build-cache --parallel assembleDebug
+      - name: Verify APK is signed and publish
+        if: steps.job.outputs.build_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ID: ${{ steps.job.outputs.build_id }}
+          PROJECT_ID: ${{ steps.job.outputs.project_id }}
+          APP_NAME: ${{ steps.job.outputs.name }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -e
+          APK=$(find buildapp/app/build/outputs/apk/debug -name '*.apk' | head -1)
+          test -n "$APK"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify "$APK"
+          cp "$APK" app-release.apk
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Installable Android APK build ${BUILD_ID}" --latest=false
+          APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+      - name: Mark build failed
+        if: failure() && steps.job.outputs.build_id != ''
+        env:
+          BUILD_ID: ${{ steps.job.outputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"status\":\"failed\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+      - name: Close trigger issue
+        if: github.event_name == 'issues' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --reason completed
+      - name: Trigger next queued build
+        if: success() && steps.job.outputs.build_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          COUNT=$(curl -fsS "$SUPABASE_URL/rest/v1/app_creator_builds?select=id&status=eq.queued&limit=1" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
+          if [ "$COUNT" -gt 0 ]; then gh issue create --repo "$GITHUB_REPOSITORY" --title "APP_CREATOR_BUILD - next queued APK" --body "Automatic trigger for next queued build."; fi
