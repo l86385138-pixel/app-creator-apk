@@ -18,7 +18,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Find queued build
+      - name: Find newest queued build
         id: job
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -27,11 +27,14 @@ jobs:
           python3 - <<'PY'
           import os,json,urllib.request
           base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
-          u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1'
+          u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.desc&limit=1'
           req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
           with urllib.request.urlopen(req) as r: rows=json.load(r)
           if not rows: raise SystemExit(0)
-          row=rows[0]; p=row['app_creator_projects']; x={'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}
+          row=rows[0]; p=row['app_creator_projects']
+          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'})
+          with urllib.request.urlopen(patch): pass
+          x={'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:
             for k,v in x.items(): f.write(f'{k}={v}\n')
           PY
@@ -51,7 +54,7 @@ jobs:
           (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId 'com.appcreator."+slug+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
           name=html.escape(os.environ['APP_NAME'],quote=True)
           (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
-          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
+          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
           target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
           java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
           (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
