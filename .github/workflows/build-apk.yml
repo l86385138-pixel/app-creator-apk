@@ -25,14 +25,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           python3 - <<'PY'
-          import os,json,urllib.request,datetime
+          import os,json,urllib.request
           base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
-          H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json'}
-          now=datetime.datetime.now(datetime.timezone.utc)
-          cutoff=(now-datetime.timedelta(minutes=15)).isoformat()
-          u=base+'/rest/v1/app_creator_builds?status=eq.queued&created_at=lt.'+cutoff
-          req=urllib.request.Request(u,method='PATCH',data=json.dumps({'status':'failed','finished_at':now.isoformat()}).encode(),headers=H)
-          urllib.request.urlopen(req).read()
+          H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
           u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1'
           req=urllib.request.Request(u,headers=H)
           with urllib.request.urlopen(req) as r: rows=json.load(r)
@@ -40,8 +35,8 @@ jobs:
               open(os.environ['GITHUB_OUTPUT'],'a').write('build_id=\n')
               raise SystemExit(0)
           row=rows[0]; p=row['app_creator_projects']
-          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=b'{"status":"building"}',method='PATCH',headers=H)
-          urllib.request.urlopen(patch).read()
+          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers=H)
+          with urllib.request.urlopen(patch) as r: json.load(r)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:
               for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items(): f.write(f'{k}={v}\n')
           PY
@@ -73,7 +68,7 @@ jobs:
               if icon.exists(): icon.unlink()
           icon_attr=' android:icon="@drawable/app_icon"' if icon.exists() else ''
           (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"'+icon_attr+'><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
-          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
+          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="style/Theme.Material.Light.NoActionBar"/></resources>'.replace('parent="style/','parent="android:style/'))
           target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
           (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); s.setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
           PY
@@ -94,13 +89,15 @@ jobs:
         run: |
           set -euo pipefail
           APK=$(find buildapp/app/build/outputs/apk/release -type f -name '*.apk' | head -1)
-          test -f "$APK"; test "$(stat -c%s "$APK")" -gt 100000
+          test -f "$APK"
+          test "$(stat -c%s "$APK")" -gt 100000
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           unzip -t "$APK" >/dev/null
           "$BT/zipalign" -c -v 4 "$APK"
           "$BT/apksigner" verify --verbose --print-certs "$APK"
           "$BT/aapt2" dump badging "$APK" | tee badging.txt
-          grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt
+          grep -q '^package: name=' badging.txt
+          grep -q 'application-label:' badging.txt
           cp "$APK" app-release.apk
 
       - name: Publish APK only after validation
@@ -114,7 +111,8 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          TAG="build-${BUILD_ID}"; gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Validated Android release APK" --latest=false
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Validated Android release APK" --latest=false
           APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
