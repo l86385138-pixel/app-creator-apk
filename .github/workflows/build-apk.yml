@@ -14,10 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
       - name: Find newest queued build
         id: job
         env:
@@ -62,7 +65,7 @@ jobs:
       - name: Build release APK
         if: steps.job.outputs.build_id != ''
         working-directory: buildapp
-        run: gradle assembleRelease
+        run: gradle --no-daemon --build-cache --parallel assembleRelease
       - name: Publish APK release and update Supabase
         if: steps.job.outputs.build_id != ''
         env:
