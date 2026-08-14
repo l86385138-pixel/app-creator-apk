@@ -1,6 +1,8 @@
 name: Build App Creator APK
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '*/1 * * * *'
   workflow_dispatch:
@@ -41,8 +43,7 @@ jobs:
           patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=b'{"status":"building"}',method='PATCH',headers=H)
           urllib.request.urlopen(patch).read()
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:
-              for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items():
-                  f.write(f'{k}={v}\n')
+              for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items(): f.write(f'{k}={v}\n')
           PY
 
       - name: Generate Android project
@@ -63,24 +64,18 @@ jobs:
           (r/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
           slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:20] or 'app'
           (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId 'com.appcreator."+slug+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
-          name=html.escape(os.environ['APP_NAME'],quote=True)
-          logo=os.environ.get('LOGO_DATA','').strip()
-          icon=r/'app/src/main/res/drawable/app_icon.png'
+          name=html.escape(os.environ['APP_NAME'],quote=True); logo=os.environ.get('LOGO_DATA','').strip(); icon=r/'app/src/main/res/drawable/app_icon.png'
           try:
-              if logo.startswith('data:image/') and ',' in logo:
-                  icon.write_bytes(base64.b64decode(logo.split(',',1)[1]))
-              elif re.match(r'^https?://',logo):
-                  urllib.request.urlretrieve(logo,icon)
-              if not icon.exists() or icon.stat().st_size < 100:
-                  raise ValueError('invalid icon')
+              if logo.startswith('data:image/') and ',' in logo: icon.write_bytes(base64.b64decode(logo.split(',',1)[1]))
+              elif re.match(r'^https?://',logo): urllib.request.urlretrieve(logo,icon)
+              if not icon.exists() or icon.stat().st_size < 100: raise ValueError('invalid icon')
           except Exception:
               if icon.exists(): icon.unlink()
           icon_attr=' android:icon="@drawable/app_icon"' if icon.exists() else ''
           (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"'+icon_attr+'><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
           target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
-          java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); s.setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
-          (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
+          (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); s.setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
           PY
 
       - name: Setup Java
@@ -99,15 +94,13 @@ jobs:
         run: |
           set -euo pipefail
           APK=$(find buildapp/app/build/outputs/apk/release -type f -name '*.apk' | head -1)
-          test -f "$APK"
-          test "$(stat -c%s "$APK")" -gt 100000
+          test -f "$APK"; test "$(stat -c%s "$APK")" -gt 100000
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           unzip -t "$APK" >/dev/null
           "$BT/zipalign" -c -v 4 "$APK"
           "$BT/apksigner" verify --verbose --print-certs "$APK"
           "$BT/aapt2" dump badging "$APK" | tee badging.txt
-          grep -q '^package: name=' badging.txt
-          grep -q 'application-label:' badging.txt
+          grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt
           cp "$APK" app-release.apk
 
       - name: Publish APK only after validation
@@ -121,8 +114,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          TAG="build-${BUILD_ID}"
-          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Validated Android release APK" --latest=false
+          TAG="build-${BUILD_ID}"; gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Validated Android release APK" --latest=false
           APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
