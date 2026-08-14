@@ -1,16 +1,23 @@
 name: Build App Creator APK
+
 on:
   repository_dispatch:
     types: [appcreator_build]
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Generate Android WebView project
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
@@ -31,24 +38,17 @@ jobs:
           java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
           (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
           PY
+
       - name: Build release APK
         working-directory: buildapp
         run: gradle assembleRelease
-      - name: Upload APK and update database
+
+      - name: Publish permanent GitHub release
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ github.event.client_payload.build_id }}
-          PROJECT_ID: ${{ github.event.client_payload.project_id }}
+          APP_NAME: ${{ github.event.client_payload.name }}
         run: |
-          python3 - <<'PY'
-          import os,urllib.request,json,pathlib
-          u=os.environ['SUPABASE_URL']; k=os.environ['SUPABASE_SERVICE_ROLE_KEY']
-          apk=next(pathlib.Path('buildapp/app/build/outputs/apk/release').glob('*.apk')); path=f"{os.environ['PROJECT_ID']}/{apk.name}"
-          q=urllib.request.Request(f'{u}/storage/v1/object/appcreator-apks/{path}',data=apk.read_bytes(),method='POST',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/vnd.android.package-archive','x-upsert':'true'}); urllib.request.urlopen(q).read()
-          q=urllib.request.Request(f'{u}/storage/v1/object/sign/appcreator-apks/{path}',data=json.dumps({'expiresIn':315360000}).encode(),method='POST',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/json'}); signed=json.load(urllib.request.urlopen(q)); apkurl=u+signed['signedURL'] if signed['signedURL'].startswith('/') else signed['signedURL']
-          def patch(t,w,d):
-            q=urllib.request.Request(f'{u}/rest/v1/{t}?{w}',data=json.dumps(d).encode(),method='PATCH',headers={'Authorization':f'Bearer {k}','apikey':k,'Content-Type':'application/json','Prefer':'return=minimal'}); urllib.request.urlopen(q).read()
-          patch('app_creator_builds',f"id=eq.{os.environ['BUILD_ID']}",{'status':'ready','apk_path':path})
-          patch('app_creator_projects',f"id=eq.{os.environ['PROJECT_ID']}",{'status':'ready','apk_path':path,'apk_url':apkurl})
-          PY
+          cp buildapp/app/build/outputs/apk/release/*.apk app-release.apk
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "App Creator APK build ${BUILD_ID}" --latest=false
