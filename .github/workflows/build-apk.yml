@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-apk.yml'
 permissions:
   contents: write
 jobs:
@@ -14,11 +17,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
       - name: Find newest queued build
         id: job
         env:
@@ -61,11 +59,16 @@ jobs:
           java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
           (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
           PY
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: Build signed debug APK
         if: steps.job.outputs.build_id != ''
         working-directory: buildapp
         run: gradle --no-daemon --build-cache --parallel assembleDebug
-      - name: Verify APK signature and publish
+      - name: Verify APK is structurally valid, signed and publish
         if: steps.job.outputs.build_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,14 +78,19 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          set -e
-          APK=$(find buildapp/app/build/outputs/apk/debug -name '*.apk' | head -1)
+          set -euo pipefail
+          APK=$(find buildapp/app/build/outputs/apk/debug -type f -name '*.apk' | head -1)
           test -s "$APK"
+          unzip -t "$APK" >/dev/null
           APKSIGNER="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner"
-          "$APKSIGNER" verify "$APK"
+          ZIPALIGN="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/zipalign"
+          AAPT2="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt2"
+          "$ZIPALIGN" -c -v 4 "$APK"
+          "$APKSIGNER" verify --verbose "$APK"
+          "$AAPT2" dump badging "$APK" | grep -E "package: name=|application-label:"
           cp "$APK" app-release.apk
           TAG="build-${BUILD_ID}"
-          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Installable Android APK build ${BUILD_ID}" --latest=false
+          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Verified installable Android APK build ${BUILD_ID}" --latest=false
           APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
