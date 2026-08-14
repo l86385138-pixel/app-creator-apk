@@ -1,5 +1,7 @@
 name: Build App Creator APK
 on:
+  repository_dispatch:
+    types: [appcreator_build]
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
