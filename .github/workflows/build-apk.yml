@@ -3,14 +3,10 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
-  issues:
-    types: [opened]
 permissions:
   contents: write
-  issues: write
 jobs:
   build:
-    if: github.event_name != 'issues' || contains(github.event.issue.title, 'APP_CREATOR_BUILD')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,12 +29,14 @@ jobs:
           u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.desc&limit=1'
           req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
           with urllib.request.urlopen(req) as r: rows=json.load(r)
-          if not rows: raise SystemExit(0)
+          if not rows:
+            with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('build_id=\n')
+            raise SystemExit(0)
           row=rows[0]; p=row['app_creator_projects']
           patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'})
           with urllib.request.urlopen(patch): pass
-          for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}.items():
-            with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write(f'{k}={v}\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}.items(): f.write(f'{k}={v}\n')
           PY
       - name: Generate Android WebView project
         if: steps.job.outputs.build_id != ''
@@ -65,7 +63,7 @@ jobs:
         if: steps.job.outputs.build_id != ''
         working-directory: buildapp
         run: gradle --no-daemon --build-cache --parallel assembleDebug
-      - name: Verify APK is signed and publish
+      - name: Verify APK signature and publish
         if: steps.job.outputs.build_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,15 +75,15 @@ jobs:
         run: |
           set -e
           APK=$(find buildapp/app/build/outputs/apk/debug -name '*.apk' | head -1)
-          test -n "$APK"
           test -s "$APK"
-          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner"
+          "$APKSIGNER" verify "$APK"
           cp "$APK" app-release.apk
           TAG="build-${BUILD_ID}"
           gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Installable Android APK build ${BUILD_ID}" --latest=false
           APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
-          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
-          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
       - name: Mark build failed
         if: failure() && steps.job.outputs.build_id != ''
         env:
@@ -93,19 +91,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -H "Prefer: return=minimal" --data "{\"status\":\"failed\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
-      - name: Close trigger issue
-        if: github.event_name == 'issues' && success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --reason completed
-      - name: Trigger next queued build
-        if: success() && steps.job.outputs.build_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          COUNT=$(curl -fsS "$SUPABASE_URL/rest/v1/app_creator_builds?select=id&status=eq.queued&limit=1" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
-          if [ "$COUNT" -gt 0 ]; then gh issue create --repo "$GITHUB_REPOSITORY" --title "APP_CREATOR_BUILD - next queued APK" --body "Automatic trigger for next queued build."; fi
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"failed\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
