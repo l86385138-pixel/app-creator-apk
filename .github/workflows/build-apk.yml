@@ -27,31 +27,31 @@ jobs:
           import os,json,urllib.request
           p=json.loads(os.environ.get('EVENT_PAYLOAD') or '{}')
           if p.get('build_id'):
-            print('build_id='+str(p['build_id'])); print('project_id='+str(p['project_id'])); print('slug='+str(p['slug'])); print('name='+str(p['name'])); print('target_url='+str(p['target_url'])); raise SystemExit
-          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
-          u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1'
-          req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
-          with urllib.request.urlopen(req) as r: rows=json.load(r)
-          if not rows: raise SystemExit(0)
-          x=rows[0]; p=x['app_creator_projects']
-          print('build_id='+str(x['id'])); print('project_id='+str(p['id'])); print('slug='+str(p['slug'])); print('name='+str(p['name'])); print('target_url='+str(p['target_url']))
+            x={'build_id':p['build_id'],'project_id':p['project_id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}
+          else:
+            base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
+            u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1'
+            req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
+            with urllib.request.urlopen(req) as r: rows=json.load(r)
+            if not rows: raise SystemExit(0)
+            row=rows[0]; p=row['app_creator_projects']; x={'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for k,v in x.items(): f.write(f'{k}={v}\n')
           PY
       - name: Generate Android WebView project
         if: steps.job.outputs.build_id != ''
         env:
-          BUILD_ID: ${{ steps.job.outputs.build_id }}
           SLUG: ${{ steps.job.outputs.slug }}
           APP_NAME: ${{ steps.job.outputs.name }}
           TARGET_URL: ${{ steps.job.outputs.target_url }}
         run: |
           python3 - <<'PY'
-          import os,pathlib,re
+          import os,pathlib,re,html
           r=pathlib.Path('buildapp'); (r/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True); (r/'app/src/main/res/values').mkdir(parents=True,exist_ok=True)
           (r/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
           (r/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
-          appid='com.appcreator.'+re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:12] or 'app'
-          (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId '"+appid+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
-          import html
+          slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:12] or 'app'
+          (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId 'com.appcreator."+slug+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
           name=html.escape(os.environ['APP_NAME'],quote=True)
           (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
