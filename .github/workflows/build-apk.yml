@@ -2,12 +2,7 @@ name: Build App Creator APK
 on:
   repository_dispatch:
     types: [appcreator_build]
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/build-apk.yml'
 permissions:
   contents: write
 jobs:
@@ -17,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - name: Find newest queued build
+      - name: Find queued build
         id: job
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -30,15 +25,14 @@ jobs:
           req=urllib.request.Request(u,headers={'apikey':key,'Authorization':'Bearer '+key})
           with urllib.request.urlopen(req) as r: rows=json.load(r)
           if not rows:
-            with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('build_id=\n')
-            raise SystemExit(0)
+            open(os.environ['GITHUB_OUTPUT'],'a').write('build_id=\n'); raise SystemExit
           row=rows[0]; p=row['app_creator_projects']
-          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'})
-          with urllib.request.urlopen(patch): pass
+          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=b'{"status":"building"}',method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+          urllib.request.urlopen(patch).read()
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:
             for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url']}.items(): f.write(f'{k}={v}\n')
           PY
-      - name: Generate Android WebView project
+      - name: Generate Android project
         if: steps.job.outputs.build_id != ''
         env:
           SLUG: ${{ steps.job.outputs.slug }}
@@ -50,13 +44,13 @@ jobs:
           r=pathlib.Path('buildapp'); (r/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True); (r/'app/src/main/res/values').mkdir(parents=True,exist_ok=True)
           (r/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
           (r/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
-          slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:12] or 'app'
+          slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:20] or 'app'
           (r/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35\n defaultConfig { applicationId 'com.appcreator."+slug+"'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }\n}\n")
           name=html.escape(os.environ['APP_NAME'],quote=True)
-          (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
-          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowFullscreen">true</item></style></resources>')
+          (r/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+          (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
           target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
-          java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
+          java='package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }'
           (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
           PY
       - name: Setup Java
@@ -64,11 +58,29 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Build signed debug APK
+      - name: Build release APK
         if: steps.job.outputs.build_id != ''
         working-directory: buildapp
-        run: gradle --no-daemon --build-cache --parallel assembleDebug
-      - name: Verify APK is structurally valid, signed and publish
+        run: gradle --no-daemon clean assembleRelease
+      - name: Validate real APK
+        if: steps.job.outputs.build_id != ''
+        run: |
+          set -euo pipefail
+          APK=$(find buildapp/app/build/outputs/apk/release -type f -name '*.apk' | head -1)
+          test -f "$APK"
+          SIZE=$(stat -c%s "$APK")
+          echo "APK size: $SIZE bytes"
+          test "$SIZE" -gt 100000
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          unzip -t "$APK" >/dev/null
+          "$BT/zipalign" -c -v 4 "$APK"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/aapt2" dump badging "$APK" | tee badging.txt
+          grep -q '^package: name=' badging.txt
+          grep -q 'application-label:' badging.txt
+          grep -q 'uses-permission' <(unzip -p "$APK" AndroidManifest.xml 2>/dev/null) || true
+          cp "$APK" app-release.apk
+      - name: Publish APK only after validation
         if: steps.job.outputs.build_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,22 +91,12 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          APK=$(find buildapp/app/build/outputs/apk/debug -type f -name '*.apk' | head -1)
-          test -s "$APK"
-          unzip -t "$APK" >/dev/null
-          APKSIGNER="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner"
-          ZIPALIGN="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/zipalign"
-          AAPT2="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt2"
-          "$ZIPALIGN" -c -v 4 "$APK"
-          "$APKSIGNER" verify --verbose "$APK"
-          "$AAPT2" dump badging "$APK" | grep -E "package: name=|application-label:"
-          cp "$APK" app-release.apk
           TAG="build-${BUILD_ID}"
-          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Verified installable Android APK build ${BUILD_ID}" --latest=false
+          gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Validated Android release APK" --latest=false
           APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
-      - name: Mark build failed
+      - name: Mark failed
         if: failure() && steps.job.outputs.build_id != ''
         env:
           BUILD_ID: ${{ steps.job.outputs.build_id }}
