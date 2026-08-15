@@ -1,0 +1,17 @@
+name: Actions Diagnostic
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm runner
+        run: |
+          echo "GitHub Actions runner started successfully"
+          echo "SHA=$GITHUB_SHA"
+          echo "REF=$GITHUB_REF"
