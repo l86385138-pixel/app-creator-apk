@@ -1,0 +1,23 @@
+name: Build App Creator APK
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner check
+        run: echo "APK workflow runner started"
+      - uses: actions/checkout@v4
+      - name: Java setup
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android build environment check
+        run: |
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
