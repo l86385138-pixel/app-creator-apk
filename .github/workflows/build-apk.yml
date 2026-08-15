@@ -19,11 +19,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Claim queued build
+      - name: Claim build
         id: job
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -32,32 +32,26 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,json,time,urllib.request
-          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip(); H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json'}
-          def get_json(url):
-              with urllib.request.urlopen(urllib.request.Request(url,headers=H),timeout=20) as r:
-                  raw=r.read().decode('utf-8'); return json.loads(raw) if raw.strip() else []
-          url=(base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&id=eq.'+requested+'&status=eq.queued&limit=1') if requested else (base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1')
-          deadline=time.time()+350*60
-          while time.time()<deadline:
-              try:
-                  rows=get_json(url)
-                  if rows:
-                      row=rows[0]; p=row['app_creator_projects']; patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued',data=b'{"status":"building"}',method='PATCH',headers=H)
-                      with urllib.request.urlopen(patch,timeout=20) as r: changed=r.read().decode('utf-8')
-                      if not changed.strip(): raise RuntimeError('Build claim returned no row')
-                      with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-                          out.write('build_id='+row['id']+'\n'); out.write('project_id='+p['id']+'\n'); out.write('slug='+p['slug']+'\n'); out.write('name='+p['name']+'\n'); out.write('target_url='+p['target_url']+'\n')
-                      print('Claimed build:',row['id']); break
-                  if requested: raise SystemExit('Requested build is not queued')
-              except SystemExit: raise
-              except Exception as e: print('Queue check failed:',repr(e))
-              time.sleep(10)
-          else: raise SystemExit('Timed out waiting for queued build')
+          import os,json,urllib.request
+          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip(); H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
+          def get(url):
+            with urllib.request.urlopen(urllib.request.Request(url,headers=H),timeout=20) as r: return json.loads(r.read().decode() or '[]')
+          if requested:
+            url=base+'/rest/v1/app_creator_builds?select=id,project_id,status,app_creator_projects(id,slug,name,target_url)&id=eq.'+requested+'&limit=1'
+          else:
+            url=base+'/rest/v1/app_creator_builds?select=id,project_id,status,app_creator_projects(id,slug,name,target_url)&status=in.(queued,building)&order=created_at.asc&limit=1'
+          rows=get(url)
+          if not rows: raise SystemExit('No build waiting')
+          row=rows[0]; p=row['app_creator_projects']
+          if row['status']=='queued':
+            patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued',data=b'{"status":"building"}',method='PATCH',headers=H)
+            with urllib.request.urlopen(patch,timeout=20) as r: changed=json.loads(r.read().decode() or '[]')
+            if not changed: raise SystemExit('Build was claimed by another worker')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write(f"build_id={row['id']}\nproject_id={p['id']}\nslug={p['slug']}\nname={p['name']}\ntarget_url={p['target_url']}\n")
+          print('Using build:',row['id'],row['status'])
           PY
 
       - name: Generate Android project
-        if: steps.job.outputs.build_id != ''
         env:
           PROJECT_ID: ${{ steps.job.outputs.project_id }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -77,66 +71,70 @@ jobs:
           (root/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
           (root/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
           slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:20] or 'app'
-          (root/'app/build.gradle').write_text("""plugins { id 'com.android.application' }
-          android { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId 'com.appcreator.%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; signingConfigs { release { storeFile file('../release-key.jks'); storePassword System.getenv('KEYSTORE_PASSWORD'); keyAlias System.getenv('KEY_ALIAS'); keyPassword System.getenv('KEY_PASSWORD') } }; buildTypes { release { signingConfig signingConfigs.release; minifyEnabled false } } }
-          """ % slug)
+          (root/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId 'com.appcreator.%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; signingConfigs { release { storeFile file('../release-key.jks'); storePassword System.getenv('KEYSTORE_PASSWORD'); keyAlias System.getenv('KEY_ALIAS'); keyPassword System.getenv('KEY_PASSWORD') } }; buildTypes { release { signingConfig signingConfigs.release; minifyEnabled false } } }\n" % slug)
           icon=root/'app/src/main/res/drawable/app_icon.png'
           try:
-              if logo.startswith('data:image/') and ',' in logo: icon.write_bytes(base64.b64decode(logo.split(',',1)[1]))
-              elif re.match(r'^https?://',logo): urllib.request.urlretrieve(logo,icon)
-              if not icon.exists() or icon.stat().st_size < 100: raise ValueError('invalid icon')
+            if logo.startswith('data:image/') and ',' in logo: icon.write_bytes(base64.b64decode(logo.split(',',1)[1]))
+            elif re.match(r'^https?://',logo): urllib.request.urlretrieve(logo,icon)
+            if not icon.exists() or icon.stat().st_size<100: raise ValueError()
           except Exception:
-              if icon.exists(): icon.unlink()
+            if icon.exists(): icon.unlink()
           name=html.escape(os.environ['APP_NAME'],quote=True); ia=' android:icon="@drawable/app_icon"' if icon.exists() else ''
           (root/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"'+ia+'><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           (root/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
-          target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"'); (root/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true); s.setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
+          target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"'); (root/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
           PY
 
-      - name: Setup Java
-        if: steps.job.outputs.build_id != ''
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Create release signing key
-        if: steps.job.outputs.build_id != ''
         working-directory: buildapp
         env:
           KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
-          set -euo pipefail; : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"
+          set -euo pipefail
+          : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"
           keytool -genkeypair -v -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=App Creator, OU=Release, O=App Creator, L=India, ST=Bihar, C=IN"
 
       - name: Build release APK
-        if: steps.job.outputs.build_id != ''
         working-directory: buildapp
         env:
           KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
-          set -euo pipefail; : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD KEY_ALIAS; gradle --no-daemon --stacktrace clean assembleRelease
+          set -euo pipefail
+          : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"
+          export KEYSTORE_PASSWORD KEY_PASSWORD KEY_ALIAS
+          gradle --no-daemon --stacktrace clean assembleRelease
 
       - name: Validate signed APK
-        if: steps.job.outputs.build_id != ''
         run: |
-          set -euo pipefail; APK=$(find buildapp/app/build/outputs/apk/release -type f -name '*.apk' | head -1); test -f "$APK"; test "$(stat -c%s "$APK")" -gt 100000; BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"; unzip -t "$APK" >/dev/null; "$BT/zipalign" -c -v 4 "$APK"; "$BT/apksigner" verify --verbose --print-certs "$APK"; "$BT/aapt2" dump badging "$APK" | tee badging.txt; grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt; cp "$APK" buildapp/app-release.apk
+          set -euo pipefail
+          APK=$(find buildapp/app/build/outputs/apk/release -type f -name '*.apk' | head -1)
+          test -f "$APK"; test "$(stat -c%s "$APK")" -gt 100000
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          unzip -t "$APK" >/dev/null
+          "$BT/zipalign" -c -v 4 "$APK"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/aapt2" dump badging "$APK" | tee badging.txt
+          grep -q '^package: name=' badging.txt
+          grep -q 'application-label:' badging.txt
+          cp "$APK" buildapp/app-release.apk
 
-      - name: Upload verified APK
-        if: steps.job.outputs.build_id != ''
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ steps.job.outputs.build_id }}
           path: buildapp/app-release.apk
           if-no-files-found: error
           retention-days: 7
 
-      - name: Publish APK after validation
-        if: steps.job.outputs.build_id != ''
+      - name: Publish verified APK
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ steps.job.outputs.build_id }}
@@ -145,10 +143,15 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          set -euo pipefail; TAG="build-${BUILD_ID}"; gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated Android release APK" --latest=false; APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"; curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+          set -euo pipefail
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
+          APK_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$APK_URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$APK_URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
       - name: Mark failed
-        if: failure() && steps.job.outputs.build_id != ''
+        if: failure()
         env:
           BUILD_ID: ${{ steps.job.outputs.build_id }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
