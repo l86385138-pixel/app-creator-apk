@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [appcreator_build]
@@ -65,7 +65,7 @@ jobs:
           (root/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId '%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; buildTypes { release { minifyEnabled false } } }\n"%appid)
           name=html.escape(os.environ['APP_NAME'],quote=True); target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
           (root/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
-          (root/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="style/Theme.Material.Light.NoActionBar"/></resources>'.replace('parent="style/','parent="android:style/'))
+          (root/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
           (root/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
           PY
       - uses: actions/setup-java@v5
@@ -108,11 +108,8 @@ jobs:
           file "$APK" | grep -qi 'zip\|android'
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           unzip -t "$APK" >/dev/null
-          echo 'Checking 4-byte ZIP alignment...'
           "$BT/zipalign" -c -v 4 "$APK"
-          echo 'Checking APK signature...'
           "$BT/apksigner" verify --verbose --print-certs "$APK"
-          echo 'Checking Android package metadata...'
           "$BT/aapt2" dump badging "$APK" | tee badging.txt
           grep -q '^package: name=' badging.txt
           grep -q 'application-label:' badging.txt
