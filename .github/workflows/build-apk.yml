@@ -1,7 +1,7 @@
 name: Build App Creator APK
 on:
-  push:
-    branches: [main]
+  repository_dispatch:
+    types: [appcreator_build]
   workflow_dispatch:
 permissions:
   contents: write
@@ -13,7 +13,7 @@ jobs:
       - name: Runner check
         run: echo "APK workflow runner started"
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
