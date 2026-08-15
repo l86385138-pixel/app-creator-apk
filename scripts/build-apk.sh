@@ -3,7 +3,18 @@ set -euo pipefail
 : "${SUPABASE_URL:?SUPABASE_URL secret is required}"
 : "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY secret is required}"
 api="$SUPABASE_URL/rest/v1"; headers=(-H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H 'Content-Type: application/json' -H 'Prefer: return=representation')
-row='[]'; BUILD_ID=''
+row='[]'; BUILD_ID=''; PROJECT_ID=''
+fail_build(){
+  rc=$?
+  if [ -n "${BUILD_ID:-}" ]; then
+    python3 - "$rc" <<'PY' | curl -fsS -X PATCH "${headers[@]}" --data-binary @- "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true
+import json,sys
+print(json.dumps({"status":"failed","build_log":"worker failed with exit code %s"%sys.argv[1]}))
+PY
+  fi
+  exit "$rc"
+}
+trap fail_build ERR
 if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then BUILD_ID=$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
 import json,sys
 try: print((json.load(open(sys.argv[1])).get('client_payload') or {}).get('build_id') or '')
@@ -38,7 +49,7 @@ cat > "$root/app/build.gradle" <<EOF
 plugins { id 'com.android.application' }
 
 android { namespace 'com.appcreator'; compileSdk 35
- defaultConfig { applicationId 'com.appcreator.$slug_clean'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
+ defaultConfig { applicationId "com.appcreator.$slug_clean"; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
 }
 EOF
 python3 - <<'PY'
@@ -55,7 +66,8 @@ else:
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.graphics.Color; import android.webkit.*; import android.widget.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.VERTICAL); TextView t=new TextView(this);t.setText(R.string.app_name);t.setTextColor(Color.WHITE);t.setTextSize(19);t.setPadding(16,8,8,8);t.setBackgroundColor(Color.rgb(23,32,51));r.addView(t);WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+u+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}')
 PY
 (cd "$root" && gradle --no-daemon clean assembleRelease)
-APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)"; KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
+APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
+BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"; KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
 keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null
 "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk
 "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
@@ -63,7 +75,19 @@ keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -k
 "$BT/apksigner" verify --verbose app-release.apk
 "$BT/aapt2" dump badging app-release.apk | tee badging.txt
 grep -Fq "application-label:'$APP_NAME'" badging.txt
+if [[ "$LOGO_DATA" == data:image/* ]]; then
+  grep -Fq "application-icon-160:" badging.txt || { echo 'Logo/icon resource validation failed'; exit 1; }
+fi
 TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is required for Release upload}"
+export GH_TOKEN="$GITHUB_TOKEN"
 gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
-curl -fsS -X PATCH "${headers[@]}" --data "{\"apk_url\":\"$URL\",\"status\":\"ready\"}" "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null
-curl -fsS -X PATCH "${headers[@]}" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null
+python3 - "$URL" "$APP_NAME" <<'PY' | curl -fsS -X PATCH "${headers[@]}" --data-binary @- "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null
+import json,sys
+print(json.dumps({"apk_url":sys.argv[1]}))
+PY
+python3 - "$URL" <<'PY' | curl -fsS -X PATCH "${headers[@]}" --data-binary @- "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null
+import json,sys
+print(json.dumps({"status":"ready","apk_path":sys.argv[1]}))
+PY
+trap - ERR
