@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,json,urllib.request,time,datetime
+          import os,json,urllib.request,time
           base=os.environ['SUPABASE_URL'].rstrip('/'); key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip()
           H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
           def call(url,method='GET',data=None):
@@ -35,15 +35,15 @@ jobs:
               return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&id=eq.'+requested+'&status=in.(queued,building)&limit=1')
             rows=call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1')
             if rows:return rows
-            # Recover a worker-stuck build only after it has been building for at least 10 minutes.
-            cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=10)).isoformat().replace('+00:00','Z')
-            return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&status=eq.building&created_at=lt.'+cutoff+'&order=created_at.asc&limit=1')
+            return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&status=eq.building&order=created_at.asc&limit=1')
           row=None
           for _ in range(24):
             rows=find()
-            if rows: row=rows[0]; break
+            if rows:
+              row=rows[0]
+              break
             time.sleep(5)
-          if not row: raise SystemExit('No queued or recoverable build found after 120 seconds')
+          if not row: raise SystemExit('No queued/building build found after 120 seconds')
           p=row['app_creator_projects']
           if row['status']=='queued':
             changed=call(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued','PATCH',b'{"status":"building"}')
