@@ -4,41 +4,56 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: app-creator-apk-worker
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Find queued build
+      - name: Wait for queued build
         id: job
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import os,json,urllib.request
+          import os,json,time,urllib.request
           base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
           H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
           u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1'
-          req=urllib.request.Request(u,headers=H)
-          with urllib.request.urlopen(req) as r: rows=json.load(r)
-          if not rows:
-              open(os.environ['GITHUB_OUTPUT'],'a').write('build_id=\n')
-              raise SystemExit(0)
-          row=rows[0]; p=row['app_creator_projects']
-          patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers=H)
-          with urllib.request.urlopen(patch) as r: json.load(r)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
-              for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items(): f.write(f'{k}={v}\n')
+          deadline=time.time()+350*60
+          while time.time()<deadline:
+              try:
+                  req=urllib.request.Request(u,headers=H)
+                  with urllib.request.urlopen(req,timeout=20) as r: rows=json.load(r)
+                  if rows:
+                      row=rows[0]; p=row['app_creator_projects']
+                      patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers=H)
+                      with urllib.request.urlopen(patch,timeout=20) as r: r.read()
+                      with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+                          for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items(): f.write(f'{k}={v}\n')
+                      print('Picked build:',row['id'])
+                      break
+              except Exception as e:
+                  print('Queue check failed:',e)
+              print('No queued build yet; checking again in 10 seconds...')
+              time.sleep(10)
+          else:
+              raise SystemExit('Timed out waiting for a queued build')
           PY
 
       - name: Generate Android project
@@ -99,6 +114,15 @@ jobs:
           grep -q '^package: name=' badging.txt
           grep -q 'application-label:' badging.txt
           cp "$APK" app-release.apk
+
+      - name: Upload verified APK artifact
+        if: steps.job.outputs.build_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-${{ steps.job.outputs.build_id }}
+          path: app-release.apk
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Publish APK only after validation
         if: steps.job.outputs.build_id != ''
