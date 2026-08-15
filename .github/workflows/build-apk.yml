@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,json,urllib.request,time,datetime
+          import os,json,urllib.request,time
           base=os.environ['SUPABASE_URL'].rstrip('/'); key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip()
           H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
           def call(url,method='GET',data=None):
@@ -60,7 +60,7 @@ jobs:
           (root/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
           (root/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
           slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:20] or 'app'; appid='com.appcreator.'+slug
-          (root/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId '%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; signingConfigs { release { storeFile file('../release-key.jks'); storePassword System.getenv('KEYSTORE_PASSWORD'); keyAlias System.getenv('KEY_ALIAS'); keyPassword System.getenv('KEY_PASSWORD') } }; buildTypes { release { signingConfig signingConfigs.release; minifyEnabled false } } }\n"%appid)
+          (root/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId '%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; buildTypes { release { minifyEnabled false } } }\n"%appid)
           name=html.escape(os.environ['APP_NAME'],quote=True); target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
           (root/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           (root/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
@@ -81,15 +81,38 @@ jobs:
           set -euo pipefail; : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"; keytool -genkeypair -v -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=App Creator, OU=Release, O=App Creator, L=India, ST=Bihar, C=IN"
       - name: Build release APK
         working-directory: buildapp
+        run: |
+          set -euo pipefail; gradle --no-daemon clean assembleRelease
+      - name: Align and sign APK
+        working-directory: buildapp
         env:
           KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
-          set -euo pipefail; : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD KEY_ALIAS; gradle --no-daemon clean assembleRelease
+          set -euo pipefail
+          : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"
+          : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"
+          : "${KEY_ALIAS:=appcreator}"
+          APK=$(find app/build/outputs/apk/release -name '*.apk' -type f | head -1)
+          test -n "$APK"
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk
+          "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
       - name: Validate APK
+        working-directory: buildapp
         run: |
-          set -euo pipefail; APK=$(find buildapp/app/build/outputs/apk/release -name '*.apk' -type f | head -1); test -n "$APK"; test "$(stat -c%s "$APK")" -gt 100000; BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)"; unzip -t "$APK" >/dev/null; "$BT/zipalign" -c 4 "$APK"; "$BT/apksigner" verify --verbose --print-certs "$APK"; "$BT/aapt2" dump badging "$APK" | tee badging.txt; grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt; cp "$APK" buildapp/app-release.apk
+          set -euo pipefail
+          APK=app-release.apk
+          test -s "$APK"
+          test "$(stat -c%s "$APK")" -gt 100000
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          unzip -t "$APK" >/dev/null
+          "$BT/zipalign" -c -P 16 -v 4 "$APK"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/aapt2" dump badging "$APK" | tee badging.txt
+          grep -q '^package: name=' badging.txt
+          grep -q 'application-label:' badging.txt
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ steps.job.outputs.build_id }}
@@ -105,7 +128,12 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          set -euo pipefail; TAG="build-${BUILD_ID}"; gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"; curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+          set -euo pipefail
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
+          curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
       - name: Mark failed
         if: failure() && steps.job.outputs.build_id != ''
         env:
