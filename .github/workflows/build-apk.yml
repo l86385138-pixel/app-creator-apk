@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: app-creator-apk-worker
+  group: app-creator-apk-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
