@@ -4,13 +4,27 @@ set -euo pipefail
 : "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY secret is required}"
 api="$SUPABASE_URL/rest/v1"
 headers=(-H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H 'Content-Type: application/json' -H 'Prefer: return=representation')
-row=''
-for i in $(seq 1 24); do
-  row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1")
-  if [ "$row" != "[]" ]; then break; fi
-  sleep 5
-done
-[ "$row" != "[]" ] || { echo 'No queued build found'; exit 1; }
+row='[]'
+BUILD_ID=''
+if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
+  BUILD_ID=$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
+import json,sys
+try:
+ d=json.load(open(sys.argv[1])); print((d.get('client_payload') or {}).get('build_id') or '')
+except Exception: print('')
+PY
+  )
+fi
+if [ -n "$BUILD_ID" ]; then
+  row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url,logo_data)&id=eq.$BUILD_ID&limit=1")
+else
+  for i in $(seq 1 24); do
+    row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1")
+    if [ "$row" != "[]" ]; then break; fi
+    sleep 5
+  done
+fi
+[ "$row" != "[]" ] || { echo 'Requested build not found'; exit 1; }
 BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])' <<<"$row")
 PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["project_id"])' <<<"$row")
 APP_NAME=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["app_creator_projects"]["name"])' <<<"$row")
@@ -46,8 +60,7 @@ if logo.startswith('data:image/') and ';base64,' in logo:
  m,p=logo.split(';base64,',1); ext='png' if 'png' in m else ('webp' if 'webp' in m else 'jpg'); (r/f'app/src/main/res/drawable/app_logo.{ext}').write_bytes(base64.b64decode(p)); icon='@drawable/app_logo'
 else:
  (r/'app/src/main/res/drawable/app_logo.xml').write_text('<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48"><path android:fillColor="#087F5B" android:pathData="M24,4A20,20 0,1 0,24 44A20,20 0,1 0,24 4M24,10A14,14 0,1 1,24 38A14,14 0,1 1,24 10"/></vector>'); icon='@drawable/app_logo'
-manifest=f'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="@string/app_name" android:icon="{icon}"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>'
-(r/'app/src/main/AndroidManifest.xml').write_text(manifest)
+(r/'app/src/main/AndroidManifest.xml').write_text(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="@string/app_name" android:icon="{icon}"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
 java='package com.appcreator; import android.app.*; import android.os.*; import android.graphics.Color; import android.webkit.*; import android.widget.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.VERTICAL); TextView t=new TextView(this);t.setText(R.string.app_name);t.setTextColor(Color.WHITE);t.setTextSize(19);t.setPadding(16,8,8,8);t.setBackgroundColor(Color.rgb(23,32,51));r.addView(t);WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+target+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}'
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
 PY
