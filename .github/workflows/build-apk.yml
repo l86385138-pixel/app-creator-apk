@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: app-creator-apk-worker
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,6 +23,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Verify worker configuration
+        run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
       - name: Build and publish APK
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -29,6 +34,8 @@ jobs:
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash scripts/build-apk.sh
+      - name: Verify APK output
+        run: test -s app-release.apk
       - uses: actions/upload-artifact@v4
         with:
           name: verified-apk
