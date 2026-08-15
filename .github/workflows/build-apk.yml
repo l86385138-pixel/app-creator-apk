@@ -23,6 +23,12 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Configure Android build tools PATH
+        shell: bash
+        run: |
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          echo "$BT" >> "$GITHUB_PATH"
+          echo "ANDROID_BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
       - name: Verify worker configuration
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
       - name: Build and publish APK
@@ -37,10 +43,13 @@ jobs:
         run: bash scripts/build-apk.sh
       - name: Verify APK output
         run: test -s app-release.apk
-      - name: Verify signed APK
+      - name: Verify signed APK and package metadata
+        shell: bash
         run: |
           command -v apksigner
           apksigner verify --verbose app-release.apk
+          aapt2 dump badging app-release.apk | tee apk-badging.txt
+          grep -E "package: name='com\.appcreator\.|application-label:" apk-badging.txt
       - name: Publish workflow artifact
         uses: actions/upload-artifact@v4
         with:
