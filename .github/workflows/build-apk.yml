@@ -39,16 +39,13 @@ jobs:
           row=None
           for _ in range(24):
             rows=find()
-            if rows:
-              row=rows[0]
-              break
+            if rows: row=rows[0]; break
             time.sleep(5)
           if not row: raise SystemExit('No queued/building build found after 120 seconds')
           p=row['app_creator_projects']
           if row['status']=='queued':
             changed=call(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued','PATCH',b'{"status":"building"}')
             if not changed: raise SystemExit('Build claim lost race')
-          print('Claimed/recovered',row['id'],'status=',row['status'])
           with open(os.environ['GITHUB_OUTPUT'],'a') as o:
             for k,v in [('build_id',row['id']),('project_id',p['id']),('slug',p['slug']),('name',p['name']),('target_url',p['target_url'])]: o.write(f'{k}={v}\n')
           PY
@@ -104,9 +101,20 @@ jobs:
       - name: Validate APK
         working-directory: buildapp
         run: |
-          set -euo pipefail; APK=app-release.apk; test -s "$APK"; test "$(stat -c%s "$APK")" -gt 100000
+          set -euo pipefail
+          APK=app-release.apk
+          test -s "$APK"
+          test "$(stat -c%s "$APK")" -gt 100000
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          unzip -t "$APK" >/dev/null; "$BT/zipalign" -c -P 16 -v 4 "$APK"; "$BT/apksigner" verify --verbose --print-certs "$APK"; "$BT/aapt2" dump badging "$APK" | tee badging.txt; grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt
+          unzip -t "$APK" >/dev/null
+          echo 'Checking 4-byte ZIP alignment...'
+          "$BT/zipalign" -c 4 "$APK"
+          echo 'Checking APK signature...'
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          echo 'Checking Android package metadata...'
+          "$BT/aapt2" dump badging "$APK" | tee badging.txt
+          grep -q '^package: name=' badging.txt
+          grep -q 'application-label:' badging.txt
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ steps.job.outputs.build_id }}
@@ -122,7 +130,9 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          set -euo pipefail; TAG="build-${BUILD_ID}"; gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
+          set -euo pipefail
+          TAG="build-${BUILD_ID}"
+          gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
           URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
