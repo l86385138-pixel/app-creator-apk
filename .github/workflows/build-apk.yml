@@ -6,13 +6,15 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [appcreator_build]
 
 permissions:
   contents: write
 
 concurrency:
-  group: app-creator-apk-worker
-  cancel-in-progress: true
+  group: app-creator-apk-${{ github.event.client_payload.build_id || 'worker' }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -28,13 +30,17 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          REQUESTED_BUILD_ID: ${{ github.event.client_payload.build_id }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,json,time,urllib.request
-          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          import os,json,time,urllib.request,sys
+          base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip()
           H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
-          u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1'
+          if requested:
+              u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url,logo_data)&id=eq.'+requested+'&status=eq.queued&limit=1'
+          else:
+              u=base+'/rest/v1/app_creator_builds?select=id,project_id,app_creator_projects(id,slug,name,target_url,logo_data)&status=eq.queued&order=created_at.asc&limit=1'
           deadline=time.time()+350*60
           while time.time()<deadline:
               try:
@@ -42,18 +48,16 @@ jobs:
                   with urllib.request.urlopen(req,timeout=20) as r: rows=json.load(r)
                   if rows:
                       row=rows[0]; p=row['app_creator_projects']
-                      patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id'],data=json.dumps({'status':'building'}).encode(),method='PATCH',headers=H)
-                      with urllib.request.urlopen(patch,timeout=20) as r: r.read()
+                      patch=urllib.request.Request(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued',data=json.dumps({'status':'building'}).encode(),method='PATCH',headers=H)
+                      with urllib.request.urlopen(patch,timeout=20) as r: claimed=json.load(r) if r.readable() else []
                       with open(os.environ['GITHUB_OUTPUT'],'a') as f:
                           for k,v in {'build_id':row['id'],'project_id':p['id'],'slug':p['slug'],'name':p['name'],'target_url':p['target_url'],'logo_data':p.get('logo_data') or ''}.items(): f.write(f'{k}={v}\n')
-                      print('Picked build:',row['id'])
-                      break
-              except Exception as e:
-                  print('Queue check failed:',e)
-              print('No queued build yet; checking again in 10 seconds...')
-              time.sleep(10)
-          else:
-              raise SystemExit('Timed out waiting for a queued build')
+                      print('Picked build:',row['id']); break
+                  if requested: raise SystemExit('Requested build is not queued; it may already be building or completed')
+              except SystemExit: raise
+              except Exception as e: print('Queue check failed:',e)
+              print('No queued build yet; checking again in 10 seconds...'); time.sleep(10)
+          else: raise SystemExit('Timed out waiting for a queued build')
           PY
 
       - name: Generate Android project
@@ -165,6 +169,7 @@ android {
           "$BT/aapt2" dump badging "$APK" | tee badging.txt
           grep -q '^package: name=' badging.txt
           grep -q 'application-label:' badging.txt
+          "$BT/aapt2" dump xmltree "$APK" AndroidManifest.xml | grep -q 'activity'
           cp "$APK" app-release.apk
           echo "VALID_APK=$APK"
 
@@ -201,11 +206,12 @@ android {
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          set +e
           python3 - <<'PY'
-          import os,urllib.request,json
+          import os,urllib.request,json,datetime
           base=os.environ['SUPABASE_URL']; key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; bid=os.environ['BUILD_ID']
-          # Preserve the failed status; the GitHub job log remains the authoritative detailed error.
           u=base+'/rest/v1/app_creator_builds?id=eq.'+bid
-          req=urllib.request.Request(u,data=json.dumps({'status':'failed','finished_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()}).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+          body={'status':'failed','build_log':'GitHub Actions build failed. Inspect the failed workflow job logs for the exact command error.','finished_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          req=urllib.request.Request(u,data=json.dumps(body).encode(),method='PATCH',headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json'})
           urllib.request.urlopen(req,timeout=20).read()
           PY
