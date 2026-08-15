@@ -33,6 +33,7 @@ jobs:
           APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/build-apk.sh
       - name: Verify APK output
         run: test -s app-release.apk
@@ -40,7 +41,8 @@ jobs:
         run: |
           command -v apksigner
           apksigner verify --verbose app-release.apk
-      - uses: actions/upload-artifact@v4
+      - name: Publish workflow artifact
+        uses: actions/upload-artifact@v4
         with:
           name: verified-apk
           path: app-release.apk
