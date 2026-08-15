@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,json,urllib.request,time
+          import os,json,urllib.request,time,datetime
           base=os.environ['SUPABASE_URL'].rstrip('/'); key=os.environ['SUPABASE_SERVICE_ROLE_KEY']; requested=os.environ.get('REQUESTED_BUILD_ID','').strip()
           H={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=representation'}
           def call(url,method='GET',data=None):
@@ -32,20 +32,25 @@ jobs:
             with urllib.request.urlopen(req,timeout=20) as r:return json.loads(r.read().decode() or '[]')
           def find():
             if requested:
-              return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,app_creator_projects(id,slug,name,target_url)&id=eq.'+requested+'&status=eq.queued&limit=1')
-            return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1')
+              return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&id=eq.'+requested+'&status=in.(queued,building)&limit=1')
+            rows=call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&status=eq.queued&order=created_at.asc&limit=1')
+            if rows:return rows
+            # Recover a worker-stuck build only after it has been building for at least 10 minutes.
+            cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=10)).isoformat().replace('+00:00','Z')
+            return call(base+'/rest/v1/app_creator_builds?select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url)&status=eq.building&created_at=lt.'+cutoff+'&order=created_at.asc&limit=1')
           row=None
           for _ in range(24):
             rows=find()
             if rows: row=rows[0]; break
             time.sleep(5)
-          if not row: raise SystemExit('No queued build found after 120 seconds')
+          if not row: raise SystemExit('No queued or recoverable build found after 120 seconds')
           p=row['app_creator_projects']
-          changed=call(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued','PATCH',b'{"status":"building"}')
-          if not changed: raise SystemExit('Build claim lost race')
+          if row['status']=='queued':
+            changed=call(base+'/rest/v1/app_creator_builds?id=eq.'+row['id']+'&status=eq.queued','PATCH',b'{"status":"building"}')
+            if not changed: raise SystemExit('Build claim lost race')
+          print('Claimed/recovered',row['id'],'status=',row['status'])
           with open(os.environ['GITHUB_OUTPUT'],'a') as o:
             for k,v in [('build_id',row['id']),('project_id',p['id']),('slug',p['slug']),('name',p['name']),('target_url',p['target_url'])]: o.write(f'{k}={v}\n')
-          print('Claimed',row['id'])
           PY
       - name: Generate Android project
         env:
@@ -91,28 +96,17 @@ jobs:
           KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
           set -euo pipefail
-          : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"
-          : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"
-          : "${KEY_ALIAS:=appcreator}"
-          APK=$(find app/build/outputs/apk/release -name '*.apk' -type f | head -1)
-          test -n "$APK"
+          : "${KEYSTORE_PASSWORD:=AppCreatorRelease2026!}"; : "${KEY_PASSWORD:=$KEYSTORE_PASSWORD}"; : "${KEY_ALIAS:=appcreator}"
+          APK=$(find app/build/outputs/apk/release -name '*.apk' -type f | head -1); test -n "$APK"
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk
           "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
       - name: Validate APK
         working-directory: buildapp
         run: |
-          set -euo pipefail
-          APK=app-release.apk
-          test -s "$APK"
-          test "$(stat -c%s "$APK")" -gt 100000
+          set -euo pipefail; APK=app-release.apk; test -s "$APK"; test "$(stat -c%s "$APK")" -gt 100000
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          unzip -t "$APK" >/dev/null
-          "$BT/zipalign" -c -P 16 -v 4 "$APK"
-          "$BT/apksigner" verify --verbose --print-certs "$APK"
-          "$BT/aapt2" dump badging "$APK" | tee badging.txt
-          grep -q '^package: name=' badging.txt
-          grep -q 'application-label:' badging.txt
+          unzip -t "$APK" >/dev/null; "$BT/zipalign" -c -P 16 -v 4 "$APK"; "$BT/apksigner" verify --verbose --print-certs "$APK"; "$BT/aapt2" dump badging "$APK" | tee badging.txt; grep -q '^package: name=' badging.txt; grep -q 'application-label:' badging.txt
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ steps.job.outputs.build_id }}
@@ -128,9 +122,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          set -euo pipefail
-          TAG="build-${BUILD_ID}"
-          gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
+          set -euo pipefail; TAG="build-${BUILD_ID}"; gh release create "$TAG" buildapp/app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes "Signed, zipaligned and validated APK" --latest=false
           URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_projects?id=eq.$PROJECT_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"apk_url\":\"$URL\",\"apk_path\":\"$TAG/app-release.apk\",\"status\":\"ready\"}"
           curl -fsS -X PATCH "$SUPABASE_URL/rest/v1/app_creator_builds?id=eq.$BUILD_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\",\"finished_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
