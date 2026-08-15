@@ -62,25 +62,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os,pathlib,re,html,base64,urllib.request,json
-          H={'apikey':os.environ['SUPABASE_SERVICE_ROLE_KEY'],'Authorization':'Bearer '+os.environ['SUPABASE_SERVICE_ROLE_KEY']}
-          u=os.environ['SUPABASE_URL']+'/rest/v1/app_creator_projects?select=logo_data&id=eq.'+os.environ['PROJECT_ID']+'&limit=1'
-          with urllib.request.urlopen(urllib.request.Request(u,headers=H),timeout=20) as r: rows=json.load(r)
-          logo=(rows[0].get('logo_data') or '').strip() if rows else ''
-          root=pathlib.Path('buildapp'); (root/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True); (root/'app/src/main/res/values').mkdir(parents=True,exist_ok=True); (root/'app/src/main/res/drawable').mkdir(parents=True,exist_ok=True)
+          import os,pathlib,re,html
+          root=pathlib.Path('buildapp'); (root/'app/src/main/java/com/appcreator').mkdir(parents=True,exist_ok=True); (root/'app/src/main/res/values').mkdir(parents=True,exist_ok=True)
           (root/'settings.gradle').write_text("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }\nrootProject.name='BuildApp'\ninclude ':app'\n")
           (root/'build.gradle').write_text("plugins { id 'com.android.application' version '8.6.1' apply false }\n")
           slug=re.sub(r'[^a-z0-9]','',os.environ['SLUG'].lower())[:20] or 'app'
           (root/'app/build.gradle').write_text("plugins { id 'com.android.application' }\nandroid { namespace 'com.appcreator'; compileSdk 35; defaultConfig { applicationId 'com.appcreator.%s'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }; signingConfigs { release { storeFile file('../release-key.jks'); storePassword System.getenv('KEYSTORE_PASSWORD'); keyAlias System.getenv('KEY_ALIAS'); keyPassword System.getenv('KEY_PASSWORD') } }; buildTypes { release { signingConfig signingConfigs.release; minifyEnabled false } } }\n" % slug)
-          icon=root/'app/src/main/res/drawable/app_icon.png'
-          try:
-            if logo.startswith('data:image/') and ',' in logo: icon.write_bytes(base64.b64decode(logo.split(',',1)[1]))
-            elif re.match(r'^https?://',logo): urllib.request.urlretrieve(logo,icon)
-            if not icon.exists() or icon.stat().st_size<100: raise ValueError()
-          except Exception:
-            if icon.exists(): icon.unlink()
-          name=html.escape(os.environ['APP_NAME'],quote=True); ia=' android:icon="@drawable/app_icon"' if icon.exists() else ''
-          (root/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"'+ia+'><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+          name=html.escape(os.environ['APP_NAME'],quote=True)
+          (root/'app/src/main/AndroidManifest.xml').write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="'+name+'" android:hardwareAccelerated="true"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           (root/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
           target=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"'); (root/'app/src/main/java/com/appcreator/MainActivity.java').write_text('package com.appcreator; import android.app.*; import android.os.*; import android.webkit.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); WebSettings s=w.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("'+target+'"); setContentView(w);} }')
           PY
