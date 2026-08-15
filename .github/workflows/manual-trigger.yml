@@ -1,0 +1,10 @@
+name: Manual APK Trigger
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Manual APK trigger is available"
