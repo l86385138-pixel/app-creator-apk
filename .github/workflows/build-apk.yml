@@ -15,22 +15,6 @@ jobs:
       - name: Runner check
         run: echo "APK queue worker started"
       - uses: actions/checkout@v4
-      - name: Fix worker queue query
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p=Path('scripts/build-apk.sh')
-          s=p.read_text()
-          s=s.replace('select=id,project_id,status,created_at,app_creator_projects(id,slug,name,target_url,logo_data)', 'select=id,project_id,status,created_at')
-          s=re.sub(r'APP_NAME=\$\(python3.*?LOGO_DATA=\$\(python3.*?<<<\"\$row\"\)', '''project=$(curl -fsS "${headers[@]}" "$api/app_creator_projects?select=id,slug,name,target_url,logo_data&id=eq.$PROJECT_ID&limit=1")
-          [ "$project" != "[]" ] || { echo "Project not found: $PROJECT_ID"; exit 1; }
-          APP_NAME=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["name"])' <<<"$project")
-          SLUG=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["slug"])' <<<"$project")
-          TARGET_URL=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["target_url"])' <<<"$project")
-          LOGO_DATA=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0].get("logo_data") or "")' <<<"$project")''', s, count=1, flags=re.S)
-          p.write_text(s)
-          PY
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
