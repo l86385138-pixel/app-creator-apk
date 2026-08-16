@@ -1,0 +1,1 @@
+Wake queue after apk-worker-v2 version 2 deployment
