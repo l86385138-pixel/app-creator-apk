@@ -58,3 +58,4 @@ jobs:
           name: verified-apk
           path: app-release.apk
           if-no-files-found: error
+# queued-worker-kick: process the oldest waiting build immediately
