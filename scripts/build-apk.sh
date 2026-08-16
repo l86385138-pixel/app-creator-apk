@@ -6,13 +6,20 @@ api="$SUPABASE_URL/rest/v1"; headers=(-H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H
 row='[]'; BUILD_ID=''; PROJECT_ID=''
 fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then curl -fsS -X PATCH "${headers[@]}" --data "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; fi; exit "$rc"; }
 trap fail_build ERR
-if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then BUILD_ID=$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
+# Explicit BUILD_ID_OVERRIDE is used by the queue-drain worker for the first dispatched build.
+if [ -n "${BUILD_ID_OVERRIDE:-}" ]; then
+  BUILD_ID="$BUILD_ID_OVERRIDE"
+elif [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
+  BUILD_ID=$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
 import json,sys
 try: print((json.load(open(sys.argv[1])).get('client_payload') or {}).get('build_id') or '')
 except: print('')
 PY
-); fi
-if [ -n "$BUILD_ID" ]; then row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at&id=eq.$BUILD_ID&limit=1"); else
+)
+fi
+if [ -n "$BUILD_ID" ]; then
+  row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at&id=eq.$BUILD_ID&limit=1")
+else
   cutoff=$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
   stale=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id&status=eq.building&created_at=lt.$cutoff&order=created_at.asc&limit=1") || stale='[]'
   if [ "$stale" != "[]" ]; then sid=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$stale"); curl -fsS -X PATCH "${headers[@]}" --data '{"status":"queued"}' "$api/app_creator_builds?id=eq.$sid&status=eq.building" >/dev/null || true; fi
