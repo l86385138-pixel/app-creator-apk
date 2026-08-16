@@ -1,78 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${SUPABASE_URL:?SUPABASE_URL secret is required}"
-: "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY secret is required}"
-api="$SUPABASE_URL/rest/v1"
+: "${WORKER_API_URL:?WORKER_API_URL is required}"
+: "${ACTIONS_ID_TOKEN_REQUEST_URL:?GitHub OIDC is required}"
+: "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?GitHub OIDC is required}"
+
 CURL_CFG=$(mktemp)
+project_file=$(mktemp)
+logo_tmp=$(mktemp)
+response_file=$(mktemp)
+cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_tmp" "$response_file"; }
+trap cleanup EXIT
+
+# Get a short-lived GitHub OIDC token. The Supabase Edge Function verifies
+# issuer, audience, repository, branch and workflow before using its own
+# server-side service role key. No long-lived Supabase key is stored in GitHub.
+OIDC_JSON=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://app-creator-apk-worker")
+export WORKER_OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$OIDC_JSON")
 cat > "$CURL_CFG" <<EOF
 --header
-apikey: $SUPABASE_SERVICE_ROLE_KEY
---header
-Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY
+Authorization: Bearer $WORKER_OIDC_TOKEN
 --header
 Content-Type: application/json
 --header
-Prefer: return=representation
+Accept: application/json
 EOF
-cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_file" "$logo_tmp"; }
-trap cleanup EXIT
-api_get(){ curl --fail --silent --show-error --config "$CURL_CFG" --url "$1"; }
-api_patch(){ local url="$1" body="$2"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$url"; rm -f "$CURL_CFG.body"; }
+worker(){ local body="$1"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$WORKER_API_URL"; rm -f "$CURL_CFG.body"; }
+
 BUILD_ID=''; PROJECT_ID=''
-fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then printf '%s' "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" > "$CURL_CFG.body"; curl --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; rm -f "$CURL_CFG.body"; fi; exit "$rc"; }
+fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" >/dev/null 2>&1 || true; fi; exit "$rc"; }
 trap fail_build ERR
-if [ -n "${BUILD_ID_OVERRIDE:-}" ]; then
-  BUILD_ID="$BUILD_ID_OVERRIDE"
-elif [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
-  BUILD_ID=$(python3 - "$GITHUB_EVENT_PATH" <<'PY'
-import json,sys
-try: print((json.load(open(sys.argv[1])).get('client_payload') or {}).get('build_id') or '')
-except Exception: print('')
-PY
-)
-fi
-if [ -n "$BUILD_ID" ]; then
-  row=$(api_get "$api/app_creator_builds?select=id,project_id,status,created_at&id=eq.$BUILD_ID&limit=1")
-else
-  cutoff=$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-  stale=$(api_get "$api/app_creator_builds?select=id&status=eq.building&created_at=lt.$cutoff&order=created_at.asc&limit=1") || stale='[]'
-  if [ "$stale" != "[]" ]; then
-    sid=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$stale")
-    api_patch "$api/app_creator_builds?id=eq.$sid&status=eq.building" '{"status":"queued"}' >/dev/null || true
-  fi
-  row=$(api_get "$api/app_creator_builds?select=id,project_id,status,created_at&status=eq.queued&order=created_at.asc&limit=1")
-fi
-[ "$row" != "[]" ] || { echo 'No queued build found'; exit 0; }
-BUILD_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$row")
-PROJECT_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["project_id"])' <<<"$row")
-project_file=$(mktemp)
-logo_file=$(mktemp)
-logo_tmp=$(mktemp)
-api_get "$api/app_creator_projects?select=id,slug,name,target_url&id=eq.$PROJECT_ID&limit=1" > "$project_file"
-[ "$(cat "$project_file")" != "[]" ] || { echo "Project not found: $PROJECT_ID"; exit 1; }
-api_get "$api/app_creator_projects?select=logo_data&id=eq.$PROJECT_ID&limit=1" > "$logo_file"
+
+# Claim the oldest queued build through the authenticated worker API.
+worker '{"action":"next"}' > "$response_file"
+[ "$(python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")' < "$response_file")" = "1" ] || { echo 'No queued build found'; exit 0; }
+BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
+PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
+
+worker "{\"action\":\"project\",\"project_id\":\"$PROJECT_ID\"}" > "$project_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))[0]["name"])
+import json,sys; print(json.load(open(sys.argv[1]))["project"]["name"])
 PY
 )
 export SLUG=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))[0]["slug"])
+import json,sys; print(json.load(open(sys.argv[1]))["project"]["slug"])
 PY
 )
 export TARGET_URL=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))[0]["target_url"])
+import json,sys; print(json.load(open(sys.argv[1]))["project"]["target_url"])
 PY
 )
-# Copy the logo directly file-to-file; never store a large base64 logo in a shell argument.
-python3 - "$logo_file" "$logo_tmp" <<'PY'
+python3 - "$project_file" "$logo_tmp" <<'PY'
 import json,sys,pathlib
-p=json.load(open(sys.argv[1])); logo=(p[0].get('logo_data') or '') if p else ''
-pathlib.Path(sys.argv[2]).write_text(logo)
+p=json.load(open(sys.argv[1]))["project"]
+pathlib.Path(sys.argv[2]).write_text(p.get("logo_data") or "")
 PY
-api_patch "$api/app_creator_builds?id=eq.$BUILD_ID" '{"status":"building"}' >/dev/null
+worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"building\"}" >/dev/null
+
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
-# Stable Android package: based only on immutable project UUID, never on editable app name/slug.
+# Stable Android package ID: derived only from immutable project UUID.
 project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-')
 package_suffix=$(printf '%s' "$project_hex" | cut -c1-16); package_suffix=${package_suffix:-app}
 cat > "$root/settings.gradle" <<'EOF'
@@ -110,7 +96,8 @@ PY
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"
 KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
-keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null
+# Reuse a persistent keystore when supplied; otherwise create one for the first build.
+if [ -n "${APK_KEYSTORE_B64:-}" ]; then printf '%s' "$APK_KEYSTORE_B64" | base64 -d > release-key.jks; else keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null; fi
 "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk
 "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
 "$BT/zipalign" -c -v 4 app-release.apk
@@ -120,6 +107,5 @@ grep -Fq "application-label:'$APP_NAME'" badging.txt
 TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"
 gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
 echo "APK_RELEASE_URL=$URL"
-printf '%s' "{\"apk_url\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null; rm -f "$CURL_CFG.body"
-printf '%s' "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null; rm -f "$CURL_CFG.body"
+worker "{\"action\":\"finish\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"apk_url\":\"$URL\"}" >/dev/null
 trap - ERR
