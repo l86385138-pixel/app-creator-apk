@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Runner check
-        run: echo "APK queue worker started - draining queued builds immediately"
+        run: echo "APK queue worker started - immediate queue drain"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
         with:
