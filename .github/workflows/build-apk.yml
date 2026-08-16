@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Runner check
-        run: echo "APK queue worker started"
+        run: echo "APK queue worker started - immediate queue kick"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
         with:
@@ -58,4 +58,5 @@ jobs:
           name: verified-apk
           path: app-release.apk
           if-no-files-found: error
-# queued-worker-kick: process the oldest waiting build immediately
+      - name: Queue worker heartbeat
+        run: echo "Queued worker completed successfully"
