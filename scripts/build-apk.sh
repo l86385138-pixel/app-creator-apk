@@ -17,9 +17,18 @@ BUILD_ID=''; PROJECT_ID=''
 fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" >/dev/null 2>&1 || true; fi; exit "$rc"; }
 trap fail_build ERR
 worker '{"action":"next"}' > "$response_file"
-[ "$(python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")' < "$response_file")" = "1" ] || { echo 'No queued build found'; exit 0; }
-BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
-PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
+HAS_BUILD=$(python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")' < "$response_file")
+if [ "$HAS_BUILD" = "1" ]; then
+  BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
+  PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
+else
+  # Recover a build already claimed as building by a previous queue worker.
+  RECOVER=$(curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data '{"action":"recover"}' --url "$WORKER_API_URL")
+  HAS_RECOVER=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")')
+  if [ "$HAS_RECOVER" != "1" ]; then echo 'No queued or recoverable build found'; exit 0; fi
+  BUILD_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])')
+  PROJECT_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])')
+fi
 worker "{\"action\":\"project\",\"project_id\":\"$PROJECT_ID\"}" > "$project_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))["project"]["name"])
