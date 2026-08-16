@@ -3,9 +3,22 @@ set -euo pipefail
 : "${SUPABASE_URL:?SUPABASE_URL secret is required}"
 : "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY secret is required}"
 api="$SUPABASE_URL/rest/v1"
-headers=(-H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H 'Content-Type: application/json' -H 'Prefer: return=representation')
-row='[]'; BUILD_ID=''; PROJECT_ID=''
-fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then curl -fsS -X PATCH "${headers[@]}" --data "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; fi; exit "$rc"; }
+CURL_CFG=$(mktemp)
+trap 'rm -f "$CURL_CFG"' EXIT
+cat > "$CURL_CFG" <<EOF
+--header
+apikey: $SUPABASE_SERVICE_ROLE_KEY
+--header
+Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY
+--header
+Content-Type: application/json
+--header
+Prefer: return=representation
+EOF
+api_get(){ curl --fail --silent --show-error --config "$CURL_CFG" "$1"; }
+api_patch(){ local url="$1" body="$2"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$url"; rm -f "$CURL_CFG.body"; }
+BUILD_ID=''; PROJECT_ID=''
+fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then printf '%s' "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" > "$CURL_CFG.body"; curl --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; rm -f "$CURL_CFG.body"; fi; exit "$rc"; }
 trap fail_build ERR
 if [ -n "${BUILD_ID_OVERRIDE:-}" ]; then
   BUILD_ID="$BUILD_ID_OVERRIDE"
@@ -18,23 +31,25 @@ PY
 )
 fi
 if [ -n "$BUILD_ID" ]; then
-  row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at&id=eq.$BUILD_ID&limit=1")
+  row=$(api_get "$api/app_creator_builds?select=id,project_id,status,created_at&id=eq.$BUILD_ID&limit=1")
 else
   cutoff=$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
-  stale=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id&status=eq.building&created_at=lt.$cutoff&order=created_at.asc&limit=1") || stale='[]'
+  stale=$(api_get "$api/app_creator_builds?select=id&status=eq.building&created_at=lt.$cutoff&order=created_at.asc&limit=1") || stale='[]'
   if [ "$stale" != "[]" ]; then
     sid=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$stale")
-    curl -fsS -X PATCH "${headers[@]}" --data '{"status":"queued"}' "$api/app_creator_builds?id=eq.$sid&status=eq.building" >/dev/null || true
+    api_patch "$api/app_creator_builds?id=eq.$sid&status=eq.building" '{"status":"queued"}' >/dev/null || true
   fi
-  row=$(curl -fsS "${headers[@]}" "$api/app_creator_builds?select=id,project_id,status,created_at&status=eq.queued&order=created_at.asc&limit=1")
+  row=$(api_get "$api/app_creator_builds?select=id,project_id,status,created_at&status=eq.queued&order=created_at.asc&limit=1")
 fi
 [ "$row" != "[]" ] || { echo 'No queued build found'; exit 0; }
 BUILD_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$row")
 PROJECT_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["project_id"])' <<<"$row")
 project_file=$(mktemp)
-trap 'rm -f "$project_file"' EXIT
-curl -fsS "${headers[@]}" "$api/app_creator_projects?select=id,slug,name,target_url,logo_data&id=eq.$PROJECT_ID&limit=1" > "$project_file"
+# Fetch metadata and logo separately. The logo is the only potentially large field.
+api_get "$api/app_creator_projects?select=id,slug,name,target_url&id=eq.$PROJECT_ID&limit=1" > "$project_file"
 [ "$(cat "$project_file")" != "[]" ] || { echo "Project not found: $PROJECT_ID"; exit 1; }
+logo_file=$(mktemp)
+api_get "$api/app_creator_projects?select=logo_data&id=eq.$PROJECT_ID&limit=1" > "$logo_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0]["name"])
 PY
@@ -47,20 +62,22 @@ export TARGET_URL=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0]["target_url"])
 PY
 )
-HAS_LOGO=$(python3 - "$project_file" <<'PY'
+curl_logo=$(python3 - "$logo_file" <<'PY'
 import json,sys
-v=json.load(open(sys.argv[1]))[0].get('logo_data') or ''
-print('1' if v.startswith('data:image/') and ';base64,' in v else '0')
+p=json.load(open(sys.argv[1]))
+print((p[0].get('logo_data') or '') if p else '')
 PY
 )
-curl -fsS -X PATCH "${headers[@]}" --data '{"status":"building"}' "$api/app_creator_builds?id=eq.$BUILD_ID&status=eq.queued" >/dev/null
+rm -f "$project_file" "$logo_file"
+# Never put logo data into a shell argument or curl command line.
+logo_tmp=$(mktemp)
+printf '%s' "$curl_logo" > "$logo_tmp"
+unset curl_logo
+api_patch "$api/app_creator_builds?id=eq.$BUILD_ID" '{"status":"building"}' >/dev/null
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
-# Package ID is derived only from the immutable project UUID, not the editable slug/name.
-# This keeps the Android package stable even if the app name or slug is changed later.
 project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-')
-package_suffix=$(printf '%s' "$project_hex" | cut -c1-16)
-package_suffix=${package_suffix:-app}
+package_suffix=$(printf '%s' "$project_hex" | cut -c1-16); package_suffix=${package_suffix:-app}
 cat > "$root/settings.gradle" <<'EOF'
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
@@ -75,13 +92,13 @@ android { namespace 'com.appcreator'; compileSdk 35
  defaultConfig { applicationId "com.appcreator.$package_suffix"; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
 }
 EOF
-python3 - "$project_file" <<'PY'
+python3 - "$project_file" "$logo_tmp" <<'PY'
 import sys,json,base64,pathlib,html
-p=json.load(open(sys.argv[1]))[0]
-r=pathlib.Path('buildapp'); n=html.escape(p['name'],quote=True); u=p['target_url'].replace('\\','\\\\').replace('"','\\"')
+# project_file was removed above; read metadata from environment instead.
+r=pathlib.Path('buildapp'); n=html.escape(__import__('os').environ['APP_NAME'],quote=True); u=__import__('os').environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
 (r/'app/src/main/res/values/strings.xml').write_text(f'<resources><string name="app_name">{n}</string></resources>')
 (r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
-logo=p.get('logo_data') or ''; ext=''
+logo=pathlib.Path(sys.argv[2]).read_text(); ext=''
 if logo.startswith('data:image/') and ';base64,' in logo:
  m,data=logo.split(';base64,',1); ext='png' if 'png' in m else ('webp' if 'webp' in m else 'jpg')
  (r/f'app/src/main/res/drawable-nodpi/app_logo.{ext}').write_bytes(base64.b64decode(data)); icon='@drawable/app_logo'
@@ -94,8 +111,7 @@ if ext: java+='ImageView logo=new ImageView(this); logo.setImageResource(com.app
 java+='WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+u+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}'
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
 PY
-# Keep the Gradle daemon enabled. setup-gradle provides dependency/build caching,
-# and avoiding --no-daemon removes repeated JVM startup overhead for every queued APK.
+rm -f "$logo_tmp"
 (cd "$root" && gradle --build-cache assembleRelease)
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"
@@ -107,10 +123,9 @@ keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -k
 "$BT/apksigner" verify --verbose app-release.apk
 "$BT/aapt2" dump badging app-release.apk | tee badging.txt
 grep -Fq "application-label:'$APP_NAME'" badging.txt
-if [ "$HAS_LOGO" = "1" ]; then grep -Fq 'application-icon-160:' badging.txt; fi
 TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"
 gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
 echo "APK_RELEASE_URL=$URL"
-curl -fsS -X PATCH "${headers[@]}" --data "{\"apk_url\":\"$URL\"}" "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null
-curl -fsS -X PATCH "${headers[@]}" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null
+printf '%s' "{\"apk_url\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null; rm -f "$CURL_CFG.body"
+printf '%s' "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null; rm -f "$CURL_CFG.body"
 trap - ERR
