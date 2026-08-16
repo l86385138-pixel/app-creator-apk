@@ -60,3 +60,25 @@ jobs:
           if-no-files-found: error
       - name: Queue worker heartbeat
         run: echo "Queued worker completed successfully"
+      - name: Start next queued build immediately
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          count=$(curl -fsS "$SUPABASE_URL/rest/v1/app_creator_builds?select=id&status=eq.queued&limit=1" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          if [ "$count" -gt 0 ]; then
+            curl -fsS -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/json" \
+              --data '{"event_type":"app-build","client_payload":{"source":"queue-drain"}}'
+            echo "Next queued APK build dispatched"
+          else
+            echo "Queue empty"
+          fi
