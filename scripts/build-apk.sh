@@ -22,7 +22,6 @@ if [ "$HAS_BUILD" = "1" ]; then
   BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
   PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
 else
-  # Recover a build already claimed as building by a previous queue worker.
   RECOVER=$(curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data '{"action":"recover"}' --url "$WORKER_API_URL")
   HAS_RECOVER=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")')
   if [ "$HAS_RECOVER" != "1" ]; then echo 'No queued or recoverable build found'; exit 0; fi
@@ -86,5 +85,5 @@ APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"; KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
 if [ -n "${APK_KEYSTORE_B64:-}" ]; then printf '%s' "$APK_KEYSTORE_B64" | base64 -d > release-key.jks; else keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null; fi
 "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk; "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk; "$BT/zipalign" -c -v 4 app-release.apk; "$BT/apksigner" verify --verbose app-release.apk; "$BT/aapt2" dump badging app-release.apk | tee badging.txt; grep -Fq "application-label:'$APP_NAME'" badging.txt
-TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"; gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false; echo "APK_RELEASE_URL=$URL"; worker "{\"action\":\"finish\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"apk_url\":\"$URL\"}" >/dev/null
+TAG="build-$BUILD_ID-$(date +%s)"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"; gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false; echo "APK_RELEASE_URL=$URL"; worker "{\"action\":\"finish\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"apk_url\":\"$URL\"}" >/dev/null
 trap - ERR
