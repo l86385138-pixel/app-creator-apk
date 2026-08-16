@@ -5,15 +5,18 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '* * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
   id-token: write
+concurrency:
+  group: apk-queue-worker
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - name: Runner check
         run: echo "APK queue worker started"
@@ -31,7 +34,7 @@ jobs:
           echo "ANDROID_BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
       - name: Verify worker configuration
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
-      - name: Drain APK queue
+      - name: Run persistent APK queue worker
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
@@ -43,16 +46,19 @@ jobs:
         shell: bash
         run: |
           set -u
-          echo "Waking APK worker and draining queued builds..."
+          echo "Starting persistent APK queue worker. New builds will be picked up within seconds."
           curl -sS -X POST "$WORKER_API_URL" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
             --data '{"action":"recover"}' || true
           echo
-          for i in $(seq 1 8); do
-            echo "========== APK worker cycle $i/8 =========="
+          END=$((SECONDS + 3300))
+          CYCLE=0
+          while [ "$SECONDS" -lt "$END" ]; do
+            CYCLE=$((CYCLE + 1))
+            echo "========== APK worker cycle $CYCLE =========="
             bash scripts/build-apk.sh || true
-            sleep 2
+            sleep 3
           done
-          echo "APK queue drain finished."
+          echo "Persistent APK queue worker window finished."
