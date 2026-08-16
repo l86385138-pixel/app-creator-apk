@@ -46,10 +46,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          while true; do
+          for i in 1 2 3 4 5; do
             response=$(bash scripts/build-apk.sh 2>&1) || { echo "$response"; exit 1; }
             echo "$response"
-            if echo "$response" | grep -q "No queued build found"; then break; fi
+            if echo "$response" | grep -Eq "No queued( or recoverable)? build found"; then break; fi
           done
       - name: Queue drain complete
         run: echo "QUEUE_DRAIN_COMPLETE"
