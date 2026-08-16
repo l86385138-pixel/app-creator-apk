@@ -9,4 +9,22 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "APK worker trigger active"
+      - name: Drain queued APK builds immediately
+        env:
+          WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            response=$(curl --fail --silent --show-error \
+              -X POST "$WORKER_API_URL" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              --data '{"action":"next"}')
+            echo "$response"
+            if echo "$response" | grep -q '"build":null'; then break; fi
+            sleep 2
+          done
+          echo "APK worker trigger active"
