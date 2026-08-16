@@ -10,16 +10,13 @@ on:
 permissions:
   contents: write
   id-token: write
-concurrency:
-  group: app-creator-apk-worker
-  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Runner check
-        run: echo "APK queue worker started - immediate queue drain"
+        run: echo "APK queue worker started"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
         with:
@@ -34,7 +31,7 @@ jobs:
           echo "ANDROID_BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
       - name: Verify worker configuration
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
-      - name: Drain APK queue
+      - name: Diagnose and run APK worker
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
@@ -45,11 +42,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
-          for i in 1 2 3 4 5; do
-            response=$(bash scripts/build-apk.sh 2>&1) || { echo "$response"; exit 1; }
-            echo "$response"
-            if echo "$response" | grep -Eq "No queued( or recoverable)? build found"; then break; fi
-          done
-      - name: Queue drain complete
-        run: echo "QUEUE_DRAIN_COMPLETE"
+          set -u
+          echo "Checking worker endpoint..."
+          curl -sS -i -X POST "$WORKER_API_URL" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data '{"action":"recover"}' || true
+          echo
+          echo "Running builder..."
+          bash scripts/build-apk.sh
