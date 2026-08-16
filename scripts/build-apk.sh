@@ -21,7 +21,10 @@ fi
 [ "$row" != "[]" ] || { echo 'No queued build found'; exit 0; }
 BUILD_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$row"); PROJECT_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["project_id"])' <<<"$row")
 project=$(curl -fsS "${headers[@]}" "$api/app_creator_projects?select=id,slug,name,target_url,logo_data&id=eq.$PROJECT_ID&limit=1"); [ "$project" != "[]" ] || { echo "Project not found: $PROJECT_ID"; exit 1; }
-APP_NAME=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["name"])' <<<"$project"); SLUG=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["slug"])' <<<"$project"); TARGET_URL=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["target_url"])' <<<"$project"); LOGO_DATA=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0].get("logo_data") or "")' <<<"$project")
+export APP_NAME=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["name"])' <<<"$project")
+export SLUG=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["slug"])' <<<"$project")
+export TARGET_URL=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["target_url"])' <<<"$project")
+export LOGO_DATA=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0].get("logo_data") or "")' <<<"$project")
 curl -fsS -X PATCH "${headers[@]}" --data '{"status":"building"}' "$api/app_creator_builds?id=eq.$BUILD_ID&status=eq.queued" >/dev/null
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
 slug_clean=$(printf '%s' "$SLUG"|tr '[:upper:]' '[:lower:]'|tr -cd 'a-z0-9'|cut -c1-24); slug_clean=${slug_clean:-app}
@@ -69,6 +72,7 @@ grep -Fq "application-label:'$APP_NAME'" badging.txt
 if [[ "$LOGO_DATA" == data:image/* ]]; then grep -Fq 'application-icon-160:' badging.txt; fi
 TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"
 gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
+echo "APK_RELEASE_URL=$URL"
 curl -fsS -X PATCH "${headers[@]}" --data "{\"apk_url\":\"$URL\"}" "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null
 curl -fsS -X PATCH "${headers[@]}" --data "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null
 trap - ERR
