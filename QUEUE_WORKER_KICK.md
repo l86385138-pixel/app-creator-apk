@@ -1,1 +1,1 @@
-Queue worker kick: drain queued APK builds immediately.
+Queue worker kick: latest APK builder and queue drain are active.
