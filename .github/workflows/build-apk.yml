@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/1 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Runner check
-        run: echo "APK queue worker started - draining queued builds"
+        run: echo "APK queue worker started - draining queued builds immediately"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
         with:
