@@ -4,7 +4,6 @@ set -euo pipefail
 : "${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY secret is required}"
 api="$SUPABASE_URL/rest/v1"
 CURL_CFG=$(mktemp)
-trap 'rm -f "$CURL_CFG"' EXIT
 cat > "$CURL_CFG" <<EOF
 --header
 apikey: $SUPABASE_SERVICE_ROLE_KEY
@@ -15,10 +14,12 @@ Content-Type: application/json
 --header
 Prefer: return=representation
 EOF
-api_get(){ curl --fail --silent --show-error --config "$CURL_CFG" "$1"; }
-api_patch(){ local url="$1" body="$2"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$url"; rm -f "$CURL_CFG.body"; }
+cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_file" "$logo_tmp"; }
+trap cleanup EXIT
+api_get(){ curl --fail --silent --show-error --config "$CURL_CFG" --url "$1"; }
+api_patch(){ local url="$1" body="$2"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$url"; rm -f "$CURL_CFG.body"; }
 BUILD_ID=''; PROJECT_ID=''
-fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then printf '%s' "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" > "$CURL_CFG.body"; curl --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; rm -f "$CURL_CFG.body"; fi; exit "$rc"; }
+fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then printf '%s' "{\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" > "$CURL_CFG.body"; curl --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null || true; rm -f "$CURL_CFG.body"; fi; exit "$rc"; }
 trap fail_build ERR
 if [ -n "${BUILD_ID_OVERRIDE:-}" ]; then
   BUILD_ID="$BUILD_ID_OVERRIDE"
@@ -45,10 +46,10 @@ fi
 BUILD_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])' <<<"$row")
 PROJECT_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["project_id"])' <<<"$row")
 project_file=$(mktemp)
-# Fetch metadata and logo separately. The logo is the only potentially large field.
+logo_file=$(mktemp)
+logo_tmp=$(mktemp)
 api_get "$api/app_creator_projects?select=id,slug,name,target_url&id=eq.$PROJECT_ID&limit=1" > "$project_file"
 [ "$(cat "$project_file")" != "[]" ] || { echo "Project not found: $PROJECT_ID"; exit 1; }
-logo_file=$(mktemp)
 api_get "$api/app_creator_projects?select=logo_data&id=eq.$PROJECT_ID&limit=1" > "$logo_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0]["name"])
@@ -62,20 +63,16 @@ export TARGET_URL=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))[0]["target_url"])
 PY
 )
-curl_logo=$(python3 - "$logo_file" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1]))
-print((p[0].get('logo_data') or '') if p else '')
+# Copy the logo directly file-to-file; never store a large base64 logo in a shell argument.
+python3 - "$logo_file" "$logo_tmp" <<'PY'
+import json,sys,pathlib
+p=json.load(open(sys.argv[1])); logo=(p[0].get('logo_data') or '') if p else ''
+pathlib.Path(sys.argv[2]).write_text(logo)
 PY
-)
-rm -f "$project_file" "$logo_file"
-# Never put logo data into a shell argument or curl command line.
-logo_tmp=$(mktemp)
-printf '%s' "$curl_logo" > "$logo_tmp"
-unset curl_logo
 api_patch "$api/app_creator_builds?id=eq.$BUILD_ID" '{"status":"building"}' >/dev/null
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
+# Stable Android package: based only on immutable project UUID, never on editable app name/slug.
 project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-')
 package_suffix=$(printf '%s' "$project_hex" | cut -c1-16); package_suffix=${package_suffix:-app}
 cat > "$root/settings.gradle" <<'EOF'
@@ -92,26 +89,23 @@ android { namespace 'com.appcreator'; compileSdk 35
  defaultConfig { applicationId "com.appcreator.$package_suffix"; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
 }
 EOF
-python3 - "$project_file" "$logo_tmp" <<'PY'
-import sys,json,base64,pathlib,html
-# project_file was removed above; read metadata from environment instead.
-r=pathlib.Path('buildapp'); n=html.escape(__import__('os').environ['APP_NAME'],quote=True); u=__import__('os').environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
+python3 - "$logo_tmp" <<'PY'
+import sys,base64,pathlib,html,os
+r=pathlib.Path('buildapp'); n=html.escape(os.environ['APP_NAME'],quote=True); u=os.environ['TARGET_URL'].replace('\\','\\\\').replace('"','\\"')
 (r/'app/src/main/res/values/strings.xml').write_text(f'<resources><string name="app_name">{n}</string></resources>')
-(r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>')
-logo=pathlib.Path(sys.argv[2]).read_text(); ext=''
+(r/'app/src/main/res/values/styles.xml').write_text('<resources><style name="AppTheme" parent="style/Theme.Material.Light.NoActionBar"/></resources>')
+logo=pathlib.Path(sys.argv[1]).read_text(); ext=''
 if logo.startswith('data:image/') and ';base64,' in logo:
  m,data=logo.split(';base64,',1); ext='png' if 'png' in m else ('webp' if 'webp' in m else 'jpg')
- (r/f'app/src/main/res/drawable-nodpi/app_logo.{ext}').write_bytes(base64.b64decode(data)); icon='@drawable/app_logo'
+ pathlib.Path(r/f'app/src/main/res/drawable-nodpi/app_logo.{ext}').write_bytes(base64.b64decode(data)); icon='@drawable/app_logo'
 else:
  (r/'app/src/main/res/drawable/app_logo.xml').write_text('<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48"><path android:fillColor="#087F5B" android:pathData="M24,4A20,20 0,1 0,24 44A20,20 0,1 0,24 4M24,10A14,14 0,1 1,24 38A14,14 0,1 1,24 10"/></vector>'); icon='@drawable/app_logo'
-manifest=f'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="@string/app_name" android:icon="{icon}"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>'
-(r/'app/src/main/AndroidManifest.xml').write_text(manifest)
+(r/'app/src/main/AndroidManifest.xml').write_text(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="@string/app_name" android:icon="{icon}"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
 java='package com.appcreator; import android.app.*; import android.os.*; import android.graphics.Color; import android.webkit.*; import android.widget.*; public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.VERTICAL); TextView t=new TextView(this);t.setText(R.string.app_name);t.setTextColor(Color.WHITE);t.setTextSize(19);t.setPadding(16,8,8,8);t.setBackgroundColor(Color.rgb(23,32,51));r.addView(t);'
 if ext: java+='ImageView logo=new ImageView(this); logo.setImageResource(com.appcreator.R.drawable.app_logo); logo.setAdjustViewBounds(true); logo.setPadding(12,12,12,12); r.addView(logo,new LinearLayout.LayoutParams(-1,100));'
 java+='WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+u+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}'
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
 PY
-rm -f "$logo_tmp"
 (cd "$root" && gradle --build-cache assembleRelease)
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"
@@ -126,6 +120,6 @@ grep -Fq "application-label:'$APP_NAME'" badging.txt
 TAG="build-$BUILD_ID"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"
 gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
 echo "APK_RELEASE_URL=$URL"
-printf '%s' "{\"apk_url\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null; rm -f "$CURL_CFG.body"
-printf '%s' "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null; rm -f "$CURL_CFG.body"
+printf '%s' "{\"apk_url\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_projects?id=eq.$PROJECT_ID" >/dev/null; rm -f "$CURL_CFG.body"
+printf '%s' "{\"status\":\"ready\",\"apk_path\":\"$URL\"}" > "$CURL_CFG.body"; curl --fail --silent --show-error --request PATCH --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$api/app_creator_builds?id=eq.$BUILD_ID" >/dev/null; rm -f "$CURL_CFG.body"
 trap - ERR
