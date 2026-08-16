@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${WORKER_API_URL:?WORKER_API_URL is required}"
-: "${ACTIONS_ID_TOKEN_REQUEST_URL:?GitHub OIDC is required}"
-: "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?GitHub OIDC is required}"
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 
 CURL_CFG=$(mktemp)
 project_file=$(mktemp)
@@ -10,15 +9,9 @@ logo_tmp=$(mktemp)
 response_file=$(mktemp)
 cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_tmp" "$response_file"; }
 trap cleanup EXIT
-
-# Get a short-lived GitHub OIDC token. The Supabase Edge Function verifies
-# issuer, audience, repository, branch and workflow before using its own
-# server-side service role key. No long-lived Supabase key is stored in GitHub.
-OIDC_JSON=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://app-creator-apk-worker")
-export WORKER_OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$OIDC_JSON")
 cat > "$CURL_CFG" <<EOF
 --header
-Authorization: Bearer $WORKER_OIDC_TOKEN
+Authorization: Bearer $GITHUB_TOKEN
 --header
 Content-Type: application/json
 --header
@@ -29,13 +22,10 @@ worker(){ local body="$1"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail -
 BUILD_ID=''; PROJECT_ID=''
 fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" >/dev/null 2>&1 || true; fi; exit "$rc"; }
 trap fail_build ERR
-
-# Claim the oldest queued build through the authenticated worker API.
 worker '{"action":"next"}' > "$response_file"
 [ "$(python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")' < "$response_file")" = "1" ] || { echo 'No queued build found'; exit 0; }
 BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
 PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
-
 worker "{\"action\":\"project\",\"project_id\":\"$PROJECT_ID\"}" > "$project_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))["project"]["name"])
@@ -55,10 +45,8 @@ p=json.load(open(sys.argv[1]))["project"]
 pathlib.Path(sys.argv[2]).write_text(p.get("logo_data") or "")
 PY
 worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"building\"}" >/dev/null
-
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
-# Stable Android package ID: derived only from immutable project UUID.
 project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-')
 package_suffix=$(printf '%s' "$project_hex" | cut -c1-16); package_suffix=${package_suffix:-app}
 cat > "$root/settings.gradle" <<'EOF'
@@ -96,7 +84,6 @@ PY
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"
 KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
-# Reuse a persistent keystore when supplied; otherwise create one for the first build.
 if [ -n "${APK_KEYSTORE_B64:-}" ]; then printf '%s' "$APK_KEYSTORE_B64" | base64 -d > release-key.jks; else keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null; fi
 "$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk
 "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
