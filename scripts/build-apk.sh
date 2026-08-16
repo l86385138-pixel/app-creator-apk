@@ -18,7 +18,6 @@ Content-Type: application/json
 Accept: application/json
 EOF
 worker(){ local body="$1"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$WORKER_API_URL"; rm -f "$CURL_CFG.body"; }
-
 BUILD_ID=''; PROJECT_ID=''
 fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" >/dev/null 2>&1 || true; fi; exit "$rc"; }
 trap fail_build ERR
