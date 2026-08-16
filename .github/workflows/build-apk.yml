@@ -36,7 +36,7 @@ jobs:
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
       - name: Drain APK queue
         env:
-          WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker
+          WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
@@ -47,8 +47,6 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            # build-apk.sh claims one queued build; the worker API uses
-            # short-lived GitHub OIDC and its own server-side DB credentials.
             response=$(bash scripts/build-apk.sh 2>&1) || { echo "$response"; exit 1; }
             echo "$response"
             if echo "$response" | grep -q "No queued build found"; then break; fi
