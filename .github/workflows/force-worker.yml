@@ -9,7 +9,7 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - name: Drain queued APK builds immediately
+      - name: Drain queued and recoverable APK builds immediately
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           GITHUB_TOKEN: ${{ github.token }}
@@ -24,7 +24,16 @@ jobs:
               -H "Accept: application/json" \
               --data '{"action":"next"}')
             echo "$response"
-            if echo "$response" | grep -q '"build":null'; then break; fi
+            if echo "$response" | grep -q '"build":null'; then
+              recovery=$(curl --fail --silent --show-error \
+                -X POST "$WORKER_API_URL" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Content-Type: application/json" \
+                -H "Accept: application/json" \
+                --data '{"action":"recover"}')
+              echo "$recovery"
+              if echo "$recovery" | grep -q '"build":null'; then break; fi
+            fi
             sleep 2
           done
           echo "APK worker trigger active"
