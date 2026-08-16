@@ -56,7 +56,11 @@ PY
 curl -fsS -X PATCH "${headers[@]}" --data '{"status":"building"}' "$api/app_creator_builds?id=eq.$BUILD_ID&status=eq.queued" >/dev/null
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
-slug_clean=$(printf '%s' "$SLUG"|tr '[:upper:]' '[:lower:]'|tr -cd 'a-z0-9'|cut -c1-24); slug_clean=${slug_clean:-app}
+# Package ID is derived only from the immutable project UUID, not the editable slug/name.
+# This keeps the Android package stable even if the app name or slug is changed later.
+project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-')
+package_suffix=$(printf '%s' "$project_hex" | cut -c1-16)
+package_suffix=${package_suffix:-app}
 cat > "$root/settings.gradle" <<'EOF'
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
@@ -68,7 +72,7 @@ EOF
 cat > "$root/app/build.gradle" <<EOF
 plugins { id 'com.android.application' }
 android { namespace 'com.appcreator'; compileSdk 35
- defaultConfig { applicationId "com.appcreator.$slug_clean"; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
+ defaultConfig { applicationId "com.appcreator.$package_suffix"; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
 }
 EOF
 python3 - "$project_file" <<'PY'
@@ -90,7 +94,9 @@ if ext: java+='ImageView logo=new ImageView(this); logo.setImageResource(com.app
 java+='WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+u+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}'
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
 PY
-(cd "$root" && gradle --no-daemon --build-cache assembleRelease)
+# Keep the Gradle daemon enabled. setup-gradle provides dependency/build caching,
+# and avoiding --no-daemon removes repeated JVM startup overhead for every queued APK.
+(cd "$root" && gradle --build-cache assembleRelease)
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
 BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"
 KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
