@@ -9,13 +9,14 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  id-token: write
 concurrency:
   group: app-creator-apk-worker
   cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - name: Runner check
         run: echo "APK queue worker started - immediate queue drain"
@@ -35,21 +36,22 @@ jobs:
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
       - name: Drain APK queue
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+          APK_KEYSTORE_B64: ${{ secrets.APK_KEYSTORE_B64 }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           while true; do
-            queued=$(curl -fsS "$SUPABASE_URL/rest/v1/app_creator_builds?select=id&status=eq.queued&order=created_at.asc&limit=1" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")
-            if [ "$queued" = "[]" ]; then echo "APK queue empty"; break; fi
-            echo "Processing oldest queued build"
-            bash scripts/build-apk.sh
+            # build-apk.sh claims one queued build; the worker API uses
+            # short-lived GitHub OIDC and its own server-side DB credentials.
+            response=$(bash scripts/build-apk.sh 2>&1) || { echo "$response"; exit 1; }
+            echo "$response"
+            if echo "$response" | grep -q "No queued build found"; then break; fi
           done
       - name: Queue drain complete
         run: echo "QUEUE_DRAIN_COMPLETE"
