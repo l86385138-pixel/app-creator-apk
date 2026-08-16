@@ -41,7 +41,7 @@ PY
 worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"building\"}" >/dev/null
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
 root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
-project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-'); package_suffix=$(printf '%s' "$project_hex" | cut -c1-16); package_suffix=${package_suffix:-app}
+project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-'); package_suffix="p$(printf '%s' "$project_hex" | cut -c1-15)"; package_suffix=${package_suffix:-papp}
 cat > "$root/settings.gradle" <<'EOF'
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
