@@ -62,3 +62,4 @@ jobs:
             sleep 3
           done
           echo "Persistent APK queue worker window finished."
+# Queue dispatch event is app-build; request-build-v3 now uses the same event.
