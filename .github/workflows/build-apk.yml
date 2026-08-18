@@ -62,3 +62,5 @@ jobs:
             sleep 2
           done
           echo "APK queue worker finished."
+      - name: Worker heartbeat
+        run: echo "Queue worker cycle completed at $(date -u +%FT%TZ)"
