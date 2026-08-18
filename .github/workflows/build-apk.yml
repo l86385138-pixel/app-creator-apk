@@ -9,10 +9,6 @@ on:
   schedule:
     - cron: '*/5 * * * *'
 
-concurrency:
-  group: apk-queue-worker
-  cancel-in-progress: false
-
 permissions:
   contents: write
   actions: read
@@ -50,7 +46,7 @@ jobs:
       - name: Validate worker script
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
 
-      - name: Process exactly one queued APK build
+      - name: Process one queued APK build
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
@@ -63,7 +59,5 @@ jobs:
         run: |
           set -euo pipefail
           echo "Starting single-claim APK worker..."
-          # build-apk.sh owns claim/recover. Do not call recover here first,
-          # otherwise the build can be claimed twice and left stuck in building.
           bash scripts/build-apk.sh
           echo "APK worker completed."
