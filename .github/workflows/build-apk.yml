@@ -1,14 +1,12 @@
 name: Build App Creator APK
-
 on:
   repository_dispatch:
     types: [app-build]
   push:
     branches: [main]
-  schedule:
-    # GitHub scheduled workflows are not reliable at 1-minute cadence; this is fallback only.
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
 
 concurrency:
   group: apk-queue-worker
@@ -16,39 +14,36 @@ concurrency:
 
 permissions:
   contents: write
-  id-token: write
+  actions: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
-      - name: Runner check
-        run: echo "APK queue worker started"
-
+      - name: Start
+        run: echo "Fast APK worker started"
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 1
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
-
-      - name: Configure Android build tools PATH
+          cache-overwrite-existing: false
+      - name: Android build tools
         shell: bash
         run: |
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           echo "$BT" >> "$GITHUB_PATH"
           echo "ANDROID_BUILD_TOOLS=$BT" >> "$GITHUB_ENV"
-
-      - name: Verify worker configuration
+      - name: Validate worker
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
-
-      - name: Process one queued APK build
+      - name: Process exactly one queued APK build
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
@@ -59,17 +54,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -u
-          echo "Recovering queued APK builds..."
-          curl -sS -X POST "$WORKER_API_URL" \
+          set -euo pipefail
+          echo "Claiming and building one queued APK..."
+          curl --fail --silent --show-error -X POST "$WORKER_API_URL" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data '{"action":"recover"}' || true
-
-          echo "Starting one build worker pass..."
+            --data '{"action":"recover"}' >/tmp/recover.json || true
           bash scripts/build-apk.sh
-          echo "APK queue worker finished."
-
-      - name: Worker heartbeat
-        run: echo "Queue worker completed at $(date -u +%FT%TZ)"
+          echo "APK worker completed."
