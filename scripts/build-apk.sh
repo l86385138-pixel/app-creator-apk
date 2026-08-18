@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 : "${WORKER_API_URL:?WORKER_API_URL is required}"
 : "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 CURL_CFG=$(mktemp); project_file=$(mktemp); logo_tmp=$(mktemp); response_file=$(mktemp)
-cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_tmp" "$response_file"; }; trap cleanup EXIT
+BUILD_ID=''; PROJECT_ID=''; STEP='startup'; FINAL_SENT=0
+cleanup(){ rm -f "$CURL_CFG" "$CURL_CFG.body" "$project_file" "$logo_tmp" "$response_file"; }
+trap cleanup EXIT
 cat > "$CURL_CFG" <<EOF
 --header
 Authorization: Bearer $GITHUB_TOKEN
@@ -12,43 +14,47 @@ Content-Type: application/json
 --header
 Accept: application/json
 EOF
-worker(){ local body="$1"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$WORKER_API_URL"; rm -f "$CURL_CFG.body"; }
-BUILD_ID=''; PROJECT_ID=''
-fail_build(){ rc=$?; if [ -n "${BUILD_ID:-}" ]; then worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"failed\",\"build_log\":\"worker failed with exit code $rc\"}" >/dev/null 2>&1 || true; fi; exit "$rc"; }
-trap fail_build ERR
-worker '{"action":"next"}' > "$response_file"
+worker(){ local body="$1"; printf '%s' "$body" > "$CURL_CFG.body"; curl --fail --silent --show-error --connect-timeout 10 --max-time 30 --request POST --config "$CURL_CFG" --data-binary @"$CURL_CFG.body" --url "$WORKER_API_URL"; rm -f "$CURL_CFG.body"; }
+finish_status(){ local status="$1"; local log="$2"; if [ -n "$BUILD_ID" ] && [ "$FINAL_SENT" = 0 ]; then FINAL_SENT=1; python3 - "$BUILD_ID" "$PROJECT_ID" "$status" "$log" <<'PY' | worker
+import json,sys
+build_id,project_id,status,log=sys.argv[1:]
+print(json.dumps({'action':'status','build_id':build_id,'project_id':project_id,'status':status,'build_log':log[:4000]}))
+PY
+ fi }
+on_error(){ rc=$?; set +e; finish_status failed "Build failed at step: ${STEP}; exit code: ${rc}" >/dev/null 2>&1 || true; exit "$rc"; }
+trap on_error ERR
+STEP='claim'; worker '{"action":"next"}' > "$response_file"
 HAS_BUILD=$(python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")' < "$response_file")
 if [ "$HAS_BUILD" = "1" ]; then
-  BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
-  PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
+ BUILD_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])' < "$response_file")
+ PROJECT_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])' < "$response_file")
 else
-  RECOVER=$(curl --fail --silent --show-error --request POST --config "$CURL_CFG" --data '{"action":"recover"}' --url "$WORKER_API_URL")
-  HAS_RECOVER=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")')
-  if [ "$HAS_RECOVER" != "1" ]; then echo 'No queued or recoverable build found'; exit 0; fi
-  BUILD_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])')
-  PROJECT_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])')
+ STEP='recover'; RECOVER=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 --request POST --config "$CURL_CFG" --data '{"action":"recover"}' --url "$WORKER_API_URL")
+ HAS_RECOVER=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("build") else "0")')
+ if [ "$HAS_RECOVER" != "1" ]; then echo 'No queued or recoverable build found'; exit 0; fi
+ BUILD_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["id"])')
+ PROJECT_ID=$(printf '%s' "$RECOVER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["project_id"])')
 fi
-worker "{\"action\":\"project\",\"project_id\":\"$PROJECT_ID\"}" > "$project_file"
+STEP='project'; worker "{\"action\":\"project\",\"project_id\":\"$PROJECT_ID\"}" > "$project_file"
 export APP_NAME=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))["project"]["name"])
+import json,sys; print(json.load(open(sys.argv[1]))['project']['name'])
 PY
 )
 export SLUG=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))["project"]["slug"])
+import json,sys; print(json.load(open(sys.argv[1]))['project']['slug'])
 PY
 )
 export TARGET_URL=$(python3 - "$project_file" <<'PY'
-import json,sys; print(json.load(open(sys.argv[1]))["project"]["target_url"])
+import json,sys; print(json.load(open(sys.argv[1]))['project']['target_url'])
 PY
 )
 python3 - "$project_file" "$logo_tmp" <<'PY'
 import json,sys,pathlib
-p=json.load(open(sys.argv[1]))["project"]
-pathlib.Path(sys.argv[2]).write_text(p.get("logo_data") or "")
+p=json.load(open(sys.argv[1]))['project']; pathlib.Path(sys.argv[2]).write_text(p.get('logo_data') or '')
 PY
-worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"status\":\"building\"}" >/dev/null
+STEP='mark-building'; worker "{\"action\":\"status\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"status\":\"building\"}" >/dev/null
 rm -f app-release.apk app-release-aligned.apk release-key.jks badging.txt
-root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
+STEP='generate-project'; root=buildapp; rm -rf "$root"; mkdir -p "$root/app/src/main/java/com/appcreator" "$root/app/src/main/res/values" "$root/app/src/main/res/drawable" "$root/app/src/main/res/drawable-nodpi"
 project_hex=$(printf '%s' "$PROJECT_ID" | tr -d '-'); package_suffix="p$(printf '%s' "$project_hex" | cut -c1-15)"; package_suffix=${package_suffix:-papp}
 cat > "$root/settings.gradle" <<'EOF'
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -80,10 +86,12 @@ if ext: java+='ImageView logo=new ImageView(this); logo.setImageResource(com.app
 java+='WebView w=new WebView(this);w.getSettings().setJavaScriptEnabled(true);w.getSettings().setDomStorageEnabled(true);w.setWebViewClient(new WebViewClient());w.loadUrl("'+u+'");r.addView(w,new LinearLayout.LayoutParams(-1,0,1));setContentView(r);}}'
 (r/'app/src/main/java/com/appcreator/MainActivity.java').write_text(java)
 PY
-(cd "$root" && gradle --build-cache assembleRelease)
+STEP='gradle-build'; (cd "$root" && timeout 300s gradle --build-cache --no-daemon assembleRelease)
 APK=$(find "$root/app/build/outputs/apk/release" -name '*.apk'|head -1); [ -s "$APK" ] || { echo 'Release APK was not produced'; exit 1; }
-BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"; KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
+STEP='sign'; BT="${ANDROID_BUILD_TOOLS:-$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools"|sort -V|tail -1)}"; KEYSTORE_PASSWORD="${APK_KEYSTORE_PASSWORD:-AppCreatorRelease2026!}"; KEY_PASSWORD="${APK_KEY_PASSWORD:-$KEYSTORE_PASSWORD}"; KEY_ALIAS="${APK_KEY_ALIAS:-appcreator}"; export KEYSTORE_PASSWORD KEY_PASSWORD
 if [ -n "${APK_KEYSTORE_B64:-}" ]; then printf '%s' "$APK_KEYSTORE_B64" | base64 -d > release-key.jks; else keytool -genkeypair -keystore release-key.jks -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=App Creator,O=App Creator,C=IN' -noprompt >/dev/null; fi
-"$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk; "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk; "$BT/zipalign" -c -v 4 app-release.apk; "$BT/apksigner" verify --verbose app-release.apk; "$BT/aapt2" dump badging app-release.apk | tee badging.txt; grep -Fq "application-label:'$APP_NAME'" badging.txt
-TAG="build-$BUILD_ID-$(date +%s)"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"; gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false; echo "APK_RELEASE_URL=$URL"; worker "{\"action\":\"finish\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"apk_url\":\"$URL\"}" >/dev/null
-trap - ERR
+"$BT/zipalign" -f -p 4 "$APK" app-release-aligned.apk; "$BT/apksigner" sign --ks release-key.jks --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --ks-key-alias "$KEY_ALIAS" --out app-release.apk app-release-aligned.apk
+STEP='validate'; "$BT/zipalign" -c -v 4 app-release.apk; "$BT/apksigner" verify --verbose app-release.apk; "$BT/aapt2" dump badging app-release.apk | tee badging.txt; grep -Fq "application-label:'$APP_NAME'" badging.txt
+STEP='publish-release'; TAG="build-$BUILD_ID-$(date +%s)"; URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/app-release.apk"; export GH_TOKEN="$GITHUB_TOKEN"; timeout 120s gh release create "$TAG" app-release.apk --repo "$GITHUB_REPOSITORY" --title "$APP_NAME APK" --notes 'Verified signed APK' --latest=false
+STEP='finish'; worker "{\"action\":\"finish\",\"build_id\":\"$BUILD_ID\",\"project_id\":\"$PROJECT_ID\",\"apk_url\":\"$URL\",\"build_log\":\"APK built, signed and verified successfully\"}" >/dev/null
+FINAL_SENT=1; echo "APK_RELEASE_URL=$URL"
