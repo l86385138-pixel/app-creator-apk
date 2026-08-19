@@ -61,3 +61,5 @@ jobs:
           echo "Starting single-claim APK worker..."
           bash scripts/build-apk.sh
           echo "APK worker completed."
+
+# resilient-worker-trigger-v7
