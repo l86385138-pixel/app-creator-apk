@@ -1,4 +1,4 @@
-name: Build Great India Coaching APK
+name: Build Techear Admin APK
 
 on:
   workflow_dispatch:
@@ -40,13 +40,19 @@ jobs:
         with:
           gradle-version: '8.10'
 
-      - name: Build debug APK
+      - name: Build Techear Admin APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Verify APK exists
+        run: test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/Techear-Admin.apk
+
+      - name: Upload Techear Admin APK
         uses: actions/upload-artifact@v4
         with:
-          name: Great-India-Coaching-APK
-          path: coaching-apk/app/build/outputs/apk/debug/app-debug.apk
+          name: Techear-Admin-APK
+          path: coaching-apk/app/build/outputs/apk/debug/Techear-Admin.apk
           if-no-files-found: error
           retention-days: 30
