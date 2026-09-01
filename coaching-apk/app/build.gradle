@@ -1,5 +1,5 @@
 plugins { id 'com.android.application' }
 
-android { namespace 'technology.greatindia.coaching'; compileSdk 35
-    defaultConfig { applicationId 'technology.greatindia.coaching'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
+android { namespace 'technology.greatindia.techearadmin'; compileSdk 35
+    defaultConfig { applicationId 'technology.greatindia.techearadmin'; minSdk 23; targetSdk 35; versionCode 2; versionName '2.0' }
 }
