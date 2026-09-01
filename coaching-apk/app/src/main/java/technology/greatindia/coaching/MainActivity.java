@@ -1,3 +1,3 @@
-package technology.greatindia.coaching;
-import android.app.*; import android.os.*; import android.graphics.Color; import android.webkit.*; import android.view.*;
-public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.setBackgroundColor(Color.WHITE); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.setWebChromeClient(new WebChromeClient()); w.loadUrl("https://coaching.greatindia.technology/"); setContentView(w);} @Override public void onBackPressed(){ WebView w=(WebView)findViewById(android.R.id.content); super.onBackPressed(); } }
+package technology.greatindia.techearadmin;
+import android.app.*; import android.os.*; import android.graphics.Color; import android.webkit.*;
+public class MainActivity extends Activity { public void onCreate(Bundle b){super.onCreate(b); WebView w=new WebView(this); w.setBackgroundColor(Color.WHITE); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.getSettings().setMediaPlaybackRequiresUserGesture(false); w.setWebViewClient(new WebViewClient()); w.setWebChromeClient(new WebChromeClient()); w.loadUrl("https://coaching.greatindia.technology/"); setContentView(w);} }
