@@ -6,17 +6,19 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    - cron: '* * * * *'
 
 permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: apk-worker
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - name: Start
         run: echo "Fast APK worker started"
@@ -46,7 +48,7 @@ jobs:
       - name: Validate worker script
         run: test -s scripts/build-apk.sh && bash -n scripts/build-apk.sh
 
-      - name: Process queued APK builds
+      - name: Process one queued APK build
         env:
           WORKER_API_URL: https://rpzmnfvtfikiabowjnzj.supabase.co/functions/v1/apk-worker-v2
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
@@ -59,11 +61,5 @@ jobs:
         run: |
           set -u
           echo "Starting APK queue worker..."
-          for i in $(seq 1 8); do
-            echo "===== worker cycle $i/8 ====="
-            bash scripts/build-apk.sh || true
-            sleep 2
-          done
+          bash scripts/build-apk.sh
           echo "APK queue worker completed."
-
-# force-worker-run-2026-08-20-0805
