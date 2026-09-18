@@ -1,5 +1,34 @@
 plugins { id 'com.android.application' }
 
-android { namespace 'technology.greatindia.techearadmin'; compileSdk 35
-    defaultConfig { applicationId 'technology.greatindia.techearadmin'; minSdk 23; targetSdk 35; versionCode 2; versionName '2.0' }
+android {
+    namespace 'technology.greatindia.techearadmin'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'technology.greatindia.techearadmin'
+        minSdk 23
+        targetSdk 35
+        versionCode 3
+        versionName '3.0'
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('../techear-admin-release.jks')
+            storePassword System.getenv('TECHEAR_KEYSTORE_PASSWORD')
+            keyAlias 'techearadmin'
+            keyPassword System.getenv('TECHEAR_KEYSTORE_PASSWORD')
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            debuggable false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            debuggable true
+        }
+    }
 }
