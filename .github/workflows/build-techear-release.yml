@@ -1,0 +1,54 @@
+name: TECHEAR ADMIN Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'coaching-apk/**'
+      - '.github/workflows/build-techear-release.yml'
+
+permissions:
+  contents: read
+
+env:
+  TECHEAR_KEYSTORE_PASSWORD: TechearAdminBuild2026!
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coaching-apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
+
+      - name: Generate release key
+        run: |
+          keytool -genkeypair -v -keystore techear-admin-release.jks -alias techearadmin -keyalg RSA -keysize 2048 -validity 10000 -storepass "${{ env.TECHEAR_KEYSTORE_PASSWORD }}" -keypass "${{ env.TECHEAR_KEYSTORE_PASSWORD }}" -dname "CN=Techear Admin, O=Great India Technology, C=IN"
+
+      - name: Build signed release APK
+        env:
+          TECHEAR_KEYSTORE_PASSWORD: ${{ env.TECHEAR_KEYSTORE_PASSWORD }}
+        run: gradle :app:assembleRelease --no-daemon
+
+      - name: Verify signed non-debug APK
+        run: |
+          test -s app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TECHEAR-ADMIN-Release-APK
+          path: coaching-apk/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
