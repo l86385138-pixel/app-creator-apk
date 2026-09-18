@@ -12,7 +12,7 @@ permissions:
 
 env:
   JAVA_VERSION: '17'
-  KEYSTORE_PASSWORD: 'TechearAdminBuild2026!'
+  TECHEAR_KEYSTORE_PASSWORD: 'TechearAdminBuild2026!'
 
 jobs:
   build:
@@ -43,39 +43,30 @@ jobs:
 
       - name: Generate release signing key
         run: |
-          keytool -genkeypair -v \
-            -keystore techear-admin-release.jks \
-            -alias techearadmin \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass "${{ env.KEYSTORE_PASSWORD }}" \
-            -keypass "${{ env.KEYSTORE_PASSWORD }}" \
-            -dname "CN=Techear Admin, O=Great India Technology, C=IN"
+          keytool -genkeypair -v             -keystore techear-admin-release.jks             -alias techearadmin             -keyalg RSA             -keysize 2048             -validity 10000             -storepass "${{ env.TECHEAR_KEYSTORE_PASSWORD }}"             -keypass "${{ env.TECHEAR_KEYSTORE_PASSWORD }}"             -dname "CN=Techear Admin, O=Great India Technology, C=IN"
 
-      - name: Build unsigned release APK
+      - name: Build signed release APK
+        env:
+          TECHEAR_KEYSTORE_PASSWORD: ${{ env.TECHEAR_KEYSTORE_PASSWORD }}
         run: gradle :app:assembleRelease --no-daemon --stacktrace
 
-      - name: Sign release APK
+      - name: Verify APK is release and signed
         run: |
-          APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-          OUT="app/build/outputs/apk/release/Techear-Admin.apk"
-          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" sign \
-            --ks techear-admin-release.jks \
-            --ks-key-alias techearadmin \
-            --ks-pass "pass:${{ env.KEYSTORE_PASSWORD }}" \
-            --key-pass "pass:${{ env.KEYSTORE_PASSWORD }}" \
-            --out "${OUT}" "${APK}"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "${APK}"
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose "${APK}"
+          if grep -R "debuggable[[:space:]]*=[[:space:]]*true" app/build/intermediates/merged_manifest/release/AndroidManifest.xml; then
+            echo "Release APK must not be debuggable"
+            exit 1
+          fi
 
-      - name: Verify release APK
-        run: |
-          test -s app/build/outputs/apk/release/Techear-Admin.apk
-          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/release/Techear-Admin.apk
+      - name: Copy final APK
+        run: cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/TECHEAR-ADMIN.apk
 
-      - name: Upload Techear Admin release APK
+      - name: Upload TECHEAR ADMIN release APK
         uses: actions/upload-artifact@v4
         with:
-          name: Techear-Admin-Release-APK
-          path: coaching-apk/app/build/outputs/apk/release/Techear-Admin.apk
+          name: TECHEAR-ADMIN-Release-APK
+          path: coaching-apk/app/build/outputs/apk/release/TECHEAR-ADMIN.apk
           if-no-files-found: error
           retention-days: 30
